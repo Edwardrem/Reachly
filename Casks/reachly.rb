@@ -6,7 +6,7 @@ cask "reachly" do
 
   url "https://github.com/Edwardrem/Reachly/releases/download/v#{version}/Reachly-#{version}.dmg"
   name "Reachly"
-  desc "Free, open-source SSH client and terminal for macOS with a built-in Claude agent"
+  desc "Terminal, file transfer and AI assistant for remote machines"
   homepage "https://edwardrem.github.io/Reachly/"
 
   livecheck do
@@ -22,4 +22,10 @@ cask "reachly" do
     "~/Library/Application Support/Reachly",
     "~/Library/Preferences/io.github.edwardrem.reachly.plist",
   ]
+
+  caveats <<~EOS
+    Reachly is not notarized yet, so macOS blocks the first launch. Open it once,
+    then click Open Anyway in System Settings > Privacy & Security, or run:
+      xattr -dr com.apple.quarantine #{appdir}/Reachly.app
+  EOS
 end

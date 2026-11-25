@@ -38,10 +38,15 @@
     <li>Launch it, press <kbd>⌘N</kbd> to add a host or type <code>user@host</code> in the quick-connect field.</li>
   </ol>
 
-  <h2>Homebrew</h2>
-  <pre><code>brew tap edwardrem/reachly
-brew install --cask reachly</code></pre>
-  <p class="note">The tap repository (<code>Edwardrem/homebrew-reachly</code>) is not published yet, so use the DMG for now; the release workflow bumps the cask automatically once the tap and its token exist.</p>
+  <h2 id="homebrew">Homebrew</h2>
+  <p>Install with one command. Homebrew adds the <a href="https://github.com/Edwardrem/homebrew-reachly">Reachly tap</a> and puts the app in Applications:</p>
+  <pre><code>brew install --cask edwardrem/reachly/reachly</code></pre>
+  <p>macOS blocks the first launch the same way as the DMG: open Reachly once and click <strong>Open Anyway</strong> in System Settings › Privacy &amp; Security, or run:</p>
+  <pre><code>xattr -dr com.apple.quarantine /Applications/Reachly.app</code></pre>
+  <p>Update, remove, or remove together with your hosts, chats and settings:</p>
+  <pre><code>brew upgrade --cask reachly
+brew uninstall --cask reachly
+brew uninstall --zap --cask reachly</code></pre>
 
   <h2>Verify the download</h2>
   <p>Every release ships a <code>SHA256SUMS</code> file. Compare it with the image you downloaded:</p>

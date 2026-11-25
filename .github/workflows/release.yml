@@ -172,15 +172,24 @@ jobs:
           keep_files: true
 
       - name: Bump Homebrew cask
-        if: ${{ env.HOMEBREW_TAP_TOKEN != '' && steps.version.outputs.channel == 'stable' }}
+        # Pushes with a deploy key that can write only to the tap repository.
+        # The secret is checked inside the step: a step's own env is not visible to its `if:`.
+        if: ${{ steps.version.outputs.channel == 'stable' }}
         env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
           HOMEBREW_TAP: ${{ vars.HOMEBREW_TAP || 'Edwardrem/homebrew-reachly' }}
         run: |
+          if [ -z "$HOMEBREW_TAP_DEPLOY_KEY" ]; then echo "No HOMEBREW_TAP_DEPLOY_KEY secret; the cask is not bumped."; exit 0; fi
           VERSION="${{ steps.version.outputs.marketing }}"
           SHA=$(shasum -a 256 "dist/${APP_NAME}-${VERSION}.dmg" | cut -d' ' -f1)
-          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${HOMEBREW_TAP}.git" tap
+          KEYDIR=$(mktemp -d)
+          printf '%s\n' "$HOMEBREW_TAP_DEPLOY_KEY" > "$KEYDIR/key" && chmod 600 "$KEYDIR/key"
+          # GitHub's published SSH host key (api.github.com/meta), pinned rather than trusted on first use.
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$KEYDIR/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $KEYDIR/key -o IdentitiesOnly=yes -o UserKnownHostsFile=$KEYDIR/known_hosts -o StrictHostKeyChecking=yes"
+          git clone "git@github.com:${HOMEBREW_TAP}.git" tap
           mkdir -p tap/Casks
           sed -e "s/__VERSION__/${VERSION}/g" -e "s/__SHA256__/${SHA}/g" Casks/reachly.rb > tap/Casks/reachly.rb
-          cd tap && git config user.name "reachly-ci" && git config user.email "ci@reachly" \
-            && git add Casks/reachly.rb && git commit -m "reachly ${VERSION}" && git push
+          cd tap && git config user.name "reachly-ci" && git config user.email "ci@reachly" && git add Casks/reachly.rb
+          if git diff --cached --quiet; then echo "Cask already at ${VERSION}."; else git commit -m "reachly ${VERSION}" && git push; fi
+          rm -rf "$KEYDIR"

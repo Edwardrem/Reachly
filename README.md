@@ -228,11 +228,22 @@ right-click → Open shortcut no longer works on macOS 15 and later.
 
 ## Installing a release
 
-Download the `.dmg` from the [download page](https://edwardrem.github.io/Reachly/download/)
-or from [GitHub Releases](https://github.com/Edwardrem/Reachly/releases),
-drag the app to Applications, open it once, then allow it with **Open Anyway**
-under System Settings › Privacy & Security (see above). Every
-release also ships a `.zip` for the in-app updater and a `SHA256SUMS` file.
+With [Homebrew](https://brew.sh):
+
+```sh
+brew install --cask edwardrem/reachly/reachly
+```
+
+Or download the `.dmg` from the [download page](https://edwardrem.github.io/Reachly/download/)
+or from [GitHub Releases](https://github.com/Edwardrem/Reachly/releases) and
+drag the app to Applications.
+
+Either way, open it once, then allow it with **Open Anyway** under System
+Settings › Privacy & Security (see above), or run
+`xattr -dr com.apple.quarantine /Applications/Reachly.app`. Update with
+`brew upgrade --cask reachly`; remove with `brew uninstall --cask reachly`
+(add `--zap` to delete your hosts, chats and settings too). Every release also
+ships a `.zip` for the in-app updater and a `SHA256SUMS` file.
 Releases are cut by pushing a `vX.Y.Z` tag; see [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Repository layout
