@@ -1,0 +1,5 @@
+[
+  { "file": "dracula.json", "author": "Reachly (bundled, from Dracula Theme)" },
+  { "file": "tokyo-night.json", "author": "Reachly (bundled, from Tokyo Night)" },
+  { "file": "catppuccin-latte.json", "author": "Reachly (bundled, from Catppuccin)" }
+]

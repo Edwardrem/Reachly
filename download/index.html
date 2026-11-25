@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" type="image/png" href="../favicon.png">
+  <link rel="apple-touch-icon" href="../icon.png">
+  <title>Download Reachly</title>
+  <meta name="description" content="Download Reachly for macOS: the free, open-source SSH client and terminal with a built-in AI assistant. Every machine within reach.">
+  <link rel="stylesheet" href="../site.css">
+</head>
+<body>
+<main>
+  <nav class="top">
+    <a href="../">Reachly</a>
+    <a class="current" href="./">Download</a>
+    <a href="../releases/">Releases</a>
+    <a href="../docs/">Docs</a>
+    <a href="../themes/">Themes</a>
+    <a href="https://github.com/Edwardrem/Reachly">GitHub</a>
+  </nav>
+
+  <h1>Download Reachly</h1>
+  <p class="tagline">A disk image for macOS 15 or later, Apple silicon and Intel.</p>
+  <div class="actions">
+    <a class="button primary" data-download-latest href="https://github.com/Edwardrem/Reachly/releases/latest">Download the DMG</a>
+    <a class="button secondary" href="../releases/">All releases</a>
+    <a class="hidden" data-latest-sums href="#">SHA256SUMS</a>
+  </div>
+  <p class="note"><span data-latest-version>Latest release</span> · published on <a href="https://github.com/Edwardrem/Reachly/releases">GitHub Releases</a>.</p>
+
+  <h2>Install</h2>
+  <ol>
+    <li>Open the <code>.dmg</code> and drag <strong>Reachly</strong> to <strong>Applications</strong>.</li>
+    <li>Builds are not yet signed with an Apple Developer ID, so macOS blocks the first launch. Open the app once and dismiss the warning, then go to <strong>System Settings › Privacy &amp; Security</strong>, scroll to Security and click <strong>Open Anyway</strong> (right-click → Open no longer works on macOS 15 and later). Or run
+      <pre><code>xattr -dr com.apple.quarantine /Applications/Reachly.app</code></pre>
+      Once Developer ID signing is in place this step goes away and updates install in place.</li>
+    <li>Launch it, press <kbd>⌘N</kbd> to add a host or type <code>user@host</code> in the quick-connect field.</li>
+  </ol>
+
+  <h2>Homebrew</h2>
+  <pre><code>brew tap edwardrem/reachly
+brew install --cask reachly</code></pre>
+  <p class="note">The tap repository (<code>Edwardrem/homebrew-reachly</code>) is not published yet, so use the DMG for now; the release workflow bumps the cask automatically once the tap and its token exist.</p>
+
+  <h2>Verify the download</h2>
+  <p>Every release ships a <code>SHA256SUMS</code> file. Compare it with the image you downloaded:</p>
+  <pre><code>shasum -a 256 ~/Downloads/Reachly-*.dmg</code></pre>
+
+  <h2>Updates</h2>
+  <p>The app checks this site's <code>appcast.xml</code> once a day (Settings → Updates). Unsigned builds offer the download; signed builds update in place through Sparkle. Turn on the beta channel to follow pre-releases.</p>
+
+  <h2>Build it yourself</h2>
+  <pre><code>git clone https://github.com/Edwardrem/Reachly.git
+cd Reachly
+brew install xcodegen && xcodegen generate
+xcodebuild -project Reachly.xcodeproj -scheme Reachly -configuration Release \
+  -skipPackagePluginValidation -skipMacroValidation build</code></pre>
+
+  <footer>MIT licensed. Built by Rufaro Mutepfa and contributors.</footer>
+</main>
+<script src="../site.js"></script>
+</body>
+</html>

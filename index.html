@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="apple-touch-icon" href="icon.png">
+  <title>Reachly: every machine within reach</title>
+  <meta name="description" content="Reachly: reach any machine from one place. A free, open-source Mac app with a terminal, file transfer and an AI assistant (Claude, Caimex or your own endpoint) that works on your machines under your rules. No account, no server, no subscription.">
+  <style>
+    :root { --bg: #ffffff; --fg: #1d1d1f; --muted: #6e6e73; --accent: #2a99e6; --card: #f5f5f7; --border: #e5e5ea; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #111113; --fg: #f5f5f7; --muted: #a1a1a6; --card: #1c1c1e; --border: #2c2c2e; } }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--fg); font: 17px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", Helvetica, Arial, sans-serif; }
+    main { max-width: 880px; margin: 0 auto; padding: 56px 16px 80px; }
+    header { text-align: center; margin-bottom: 48px; }
+    h1 { font-size: 44px; margin: 0 0 8px; letter-spacing: -0.02em; }
+    .tagline { color: var(--muted); font-size: 20px; margin: 0 0 24px; }
+    .appicon { width: 128px; height: 128px; margin: 0 auto 12px; display: block; }
+    .actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+    .button { display: inline-block; padding: 12px 22px; border-radius: 10px; text-decoration: none; font-weight: 600; }
+    .primary { background: var(--accent); color: #fff; }
+    .secondary { background: var(--card); color: var(--fg); border: 1px solid var(--border); }
+    .note { color: var(--muted); font-size: 14px; margin-top: 12px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 18px; }
+    .card h3 { margin: 0 0 6px; font-size: 17px; }
+    .card p { margin: 0; color: var(--muted); font-size: 15px; }
+    .shots { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 30px 24px; margin-top: 22px; }
+    .shots.lead { grid-template-columns: 1fr; }
+    .shots figure { margin: 0; }
+    .shots img { width: 100%; height: auto; display: block; }
+    .shots figcaption { color: var(--muted); font-size: 15px; margin-top: 8px; }
+    .shots figcaption b { color: var(--fg); font-weight: 600; }
+    section { margin-top: 48px; }
+    h2 { font-size: 26px; letter-spacing: -0.01em; }
+    code { font: 14px ui-monospace, "SF Mono", Menlo, monospace; background: var(--card); padding: 2px 6px; border-radius: 6px; }
+    pre { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px; overflow-x: auto; }
+    footer { margin-top: 64px; color: var(--muted); font-size: 14px; text-align: center; }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <img class="appicon" src="icon.png" width="128" height="128" alt="">
+    <h1>Reachly</h1>
+    <p class="tagline"><strong>Every machine within reach.</strong><br>Reach any machine from one place: a free, open-source Mac app with a terminal, file transfer and an AI assistant (Claude, Caimex or your own endpoint) that works on your machines under your rules.<br>No account. No server. No subscription.</p>
+    <div class="actions">
+      <a class="button primary" data-download-latest href="https://github.com/Edwardrem/Reachly/releases/latest">Download for macOS</a>
+      <a class="button secondary" href="download/">Install notes</a>
+      <a class="button secondary" href="https://github.com/Edwardrem/Reachly">Source on GitHub</a>
+    </div>
+    <p class="note"><span data-latest-version>Latest release</span> · macOS 15 or later, Apple silicon and Intel · <a href="releases/">all releases</a>. Unsigned for now: on first launch allow it with Open Anyway in System Settings › Privacy &amp; Security (<a href="download/">details</a>).</p>
+  </header>
+
+  <section class="grid">
+    <div class="card"><h3>Everything on your Mac</h3><p>Hosts in a local database, secrets in the Keychain behind Touch ID. Nothing leaves the machine except the SSH connections you make.</p></div>
+    <div class="card"><h3>Terminal you'd expect</h3><p>Tabs, nested splits, true colour, 100 000 lines of scrollback, auto-reconnect after sleep, restored on relaunch.</p></div>
+    <div class="card"><h3>Move between Macs</h3><p>One encrypted <code>.reachly</code> file carries hosts, keys, snippets and themes. Import from <code>~/.ssh/config</code>, Termius, PuTTY and Tabby.</p></div>
+    <div class="card"><h3>Claude on your servers</h3><p>Bring your own Anthropic or Caimex API key, or connect Claude Desktop and Claude Code over MCP. Every command passes your per-host guardrails and lands in an audit log.</p></div>
+  </section>
+
+  <section id="screenshots">
+    <h2>See it in action</h2>
+    <p class="note">Every screenshot runs against a demo fleet. The hosts, keys and conversations are made up; your real hosts never leave your Mac.</p>
+    <div class="shots lead">
+      <figure>
+        <img src="screenshots/fleet-terminal.png" width="1600" height="1063" alt="Reachly terminal connected to a demo host, with a grouped host sidebar on the left" loading="lazy">
+        <figcaption><b>Your whole fleet in one window.</b> Hosts grouped into Lab, Production and Staging, tabs and splits, a true-colour terminal, and a jump host for boxes you can only reach through a bastion.</figcaption>
+      </figure>
+    </div>
+    <div class="shots">
+      <figure>
+        <img src="screenshots/claude-panel.png" width="1600" height="1063" alt="The Claude panel summarising disk usage and producing a PDF report" loading="lazy">
+        <figcaption><b>AIOps, built in.</b> Ask Claude about one host or a whole group. It reads logs, runs commands over SSH behind your guardrails, and writes a PDF or Word report you can send on.</figcaption>
+      </figure>
+      <figure>
+        <img src="screenshots/command-approval.png" width="1600" height="1013" alt="An approval sheet asking before running rm -rf on a host" loading="lazy">
+        <figcaption><b>You stay in control.</b> Destructive commands like <code>rm -rf</code> always ask first, whatever a host's permission mode, and you can edit the command before it runs.</figcaption>
+      </figure>
+      <figure>
+        <img src="screenshots/host-editor.png" width="1600" height="1013" alt="The host editor showing connection, authentication and grouping fields" loading="lazy">
+        <figcaption><b>Every host, your way.</b> Hostname, port, identity, jump host, group, tags and colour. Keys stay in the login Keychain; pick one per host or share an identity.</figcaption>
+      </figure>
+      <figure>
+        <img src="screenshots/identities.png" width="1600" height="1042" alt="The Identities and Keys window listing SSH identities" loading="lazy">
+        <figcaption><b>Keys in one place.</b> Generate or import SSH identities, push a public key to a server, and keep private keys in the Keychain behind Touch ID.</figcaption>
+      </figure>
+      <figure>
+        <img src="screenshots/groups.png" width="1600" height="1013" alt="The New Group sheet with a checklist of hosts to include" loading="lazy">
+        <figcaption><b>Organise the fleet.</b> Build groups like Production or Home lab, tick the hosts that belong, colour-code them, and drag to re-sort the sidebar.</figcaption>
+      </figure>
+      <figure>
+        <img src="screenshots/snippets.png" width="1600" height="1063" alt="The snippets sidebar with reusable commands and placeholders" loading="lazy">
+        <figcaption><b>Run it again in a keystroke.</b> Reusable command snippets with fill-in placeholders, sorted into folders, one click from any terminal.</figcaption>
+      </figure>
+      <figure>
+        <img src="screenshots/theme-editor.png" width="1600" height="1007" alt="The Theme Editor with bundled schemes and a live terminal preview" loading="lazy">
+        <figcaption><b>Make it yours.</b> Ten bundled terminal themes or your own, with a live preview. Export a theme as JSON to share, or install one from a link.</figcaption>
+      </figure>
+      <figure>
+        <img src="screenshots/light-mode.png" width="1600" height="1063" alt="Reachly in light appearance" loading="lazy">
+        <figcaption><b>Light or dark.</b> The whole app, sidebar and window chrome follow your terminal colour scheme and the system appearance.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section>
+    <h2>What's in Reachly 1.0</h2>
+    <ul>
+      <li>An AI assistant that works on your machines: Claude, Caimex or any OpenAI-compatible endpoint lists your hosts, runs commands over SSH, reads and writes files, moves files between machines and writes PDF, Word, HTML, Markdown or CSV reports.</li>
+      <li>You stay in control: each host is read-only, ask-every-time or allowlist, destructive commands always ask first, and an audit log records every command with its host, time, decision and exit status.</li>
+      <li>Attach images, PDFs, Word documents, logs or a whole folder to a question, or dictate it: speech is transcribed on your Mac.</li>
+      <li>A full terminal: tabs and nested splits, true colour, 100 000 lines of scrollback, auto-reconnect, snippets with placeholders, searchable history with exit codes and inline suggestions.</li>
+      <li>Every way in: jump hosts, HTTP and SOCKS5 proxies, port forwarding, a dual-pane SFTP browser, serial consoles for routers and boards, and imports from <code>~/.ssh/config</code>, Termius, PuTTY, Tabby, AWS, DigitalOcean and Azure.</li>
+      <li>Keys and passwords in the Keychain behind Touch ID, hosts in a local database, and an encrypted <code>.reachly</code> file to move everything to another Mac. An MCP server lets Claude Desktop and Claude Code use the same tools and guardrails.</li>
+    </ul>
+    <p class="note">Full notes on the <a href="releases/">releases page</a>.</p>
+  </section>
+
+  <section>
+    <h2>Updates</h2>
+    <p>The app checks <code>appcast.xml</code> on this site once a day. Builds signed with a Developer ID install updates in place through Sparkle; unsigned builds offer the download instead. Enable the beta channel in Settings → Updates to follow pre-releases.</p>
+  </section>
+
+  <section>
+    <h2>Documentation</h2>
+    <ul>
+      <li><a href="download/">Download and install</a> · <a href="releases/">release history</a></li>
+      <li><a href="docs/">Keyboard shortcuts and getting started</a></li>
+      <li><a href="docs/PLAN.md">Product plan and build order</a></li>
+      <li><a href="schema/">The <code>.reachly</code> file format</a></li>
+      <li><a href="themes/">Theme gallery</a></li>
+    </ul>
+  </section>
+
+  <section id="developer">
+    <h2>About the developer</h2>
+    <p>Reachly is designed and built by <strong>Rufaro Edward Mutepfa</strong>, an engineer who manages fleets of servers and AI deployments and wanted a terminal that understands them: hosts grouped as projects, every command audited, and an AI assistant on hand to inspect, operate and report. The app is free and open source; issues and pull requests are welcome.</p>
+    <p class="actions"><a class="button secondary" href="https://github.com/Edwardrem">GitHub: Edwardrem</a> <a class="button secondary" href="https://www.linkedin.com/in/rufaro-mutepfa-0a64b810a/">LinkedIn: Rufaro Mutepfa</a></p>
+  </section>
+
+  <footer>MIT licensed. Built by <a href="#developer">Rufaro Edward Mutepfa</a> and contributors.</footer>
+</main>
+<script src="site.js"></script>
+</body>
+</html>
