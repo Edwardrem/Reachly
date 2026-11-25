@@ -238,6 +238,8 @@ Or download the `.dmg` from the [download page](https://edwardrem.github.io/Reac
 or from [GitHub Releases](https://github.com/Edwardrem/Reachly/releases) and
 drag the app to Applications.
 
+If Reachly is already installed from the DMG, quit it and move it to the Trash
+before installing with Homebrew (your hosts, chats and settings are kept).
 Either way, open it once, then allow it with **Open Anyway** under System
 Settings › Privacy & Security (see above), or run
 `xattr -dr com.apple.quarantine /Applications/Reachly.app`. Update with

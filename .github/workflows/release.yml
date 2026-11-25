@@ -189,7 +189,7 @@ jobs:
           export GIT_SSH_COMMAND="ssh -i $KEYDIR/key -o IdentitiesOnly=yes -o UserKnownHostsFile=$KEYDIR/known_hosts -o StrictHostKeyChecking=yes"
           git clone "git@github.com:${HOMEBREW_TAP}.git" tap
           mkdir -p tap/Casks
-          sed -e "s/__VERSION__/${VERSION}/g" -e "s/__SHA256__/${SHA}/g" Casks/reachly.rb > tap/Casks/reachly.rb
+          sed -e "/^#/d" -e "s/__VERSION__/${VERSION}/g" -e "s/__SHA256__/${SHA}/g" Casks/reachly.rb > tap/Casks/reachly.rb
           cd tap && git config user.name "reachly-ci" && git config user.email "ci@reachly" && git add Casks/reachly.rb
           if git diff --cached --quiet; then echo "Cask already at ${VERSION}."; else git commit -m "reachly ${VERSION}" && git push; fi
           rm -rf "$KEYDIR"
