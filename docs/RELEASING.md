@@ -45,10 +45,19 @@ Enable Pages for the repository with the `gh-pages` branch as the source. The si
 
 ### Homebrew cask
 
-Create a tap repository (default `Edwardrem/homebrew-reachly`) and add a fine-grained token with write access as the secret `HOMEBREW_TAP_TOKEN`. Override the tap name with the repository variable `HOMEBREW_TAP`. Users then run:
+The tap is [`Edwardrem/homebrew-reachly`](https://github.com/Edwardrem/homebrew-reachly) (override with the repository variable `HOMEBREW_TAP`). For each stable tag the release workflow fills `Casks/reachly.rb` with the version and the DMG's checksum and pushes it there with a deploy key that can write only to the tap. Set it up once:
 
 ```sh
-brew tap edwardrem/reachly && brew install --cask reachly
+ssh-keygen -t ed25519 -N "" -C reachly-release-workflow -f tap_key
+gh repo deploy-key add tap_key.pub --repo Edwardrem/homebrew-reachly --allow-write --title "Reachly release workflow"
+gh secret set HOMEBREW_TAP_DEPLOY_KEY --repo Edwardrem/Reachly < tap_key
+rm tap_key tap_key.pub
+```
+
+Without the secret the step logs that it skipped and the cask stays at its last version (bump it by hand: substitute `__VERSION__` and `__SHA256__`). Users install with:
+
+```sh
+brew install --cask edwardrem/reachly/reachly
 ```
 
 ## Local packaging
