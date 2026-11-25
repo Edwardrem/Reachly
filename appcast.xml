@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>Reachly</title>
+    <link>https://edwardrem.github.io/Reachly/</link>
+    <description>Reachly releases</description>
+    <language>en</language>
+    <item>
+      <title>Reachly 1.0.0</title>
+      <link>https://github.com/Edwardrem/Reachly/releases/tag/v1.0.0</link>
+      <sparkle:version>1</sparkle:version>
+      <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+      <sparkle:releaseNotesLink>https://github.com/Edwardrem/Reachly/releases/tag/v1.0.0</sparkle:releaseNotesLink>
+      <pubDate>Wed, 25 Nov 2026 13:12:20 GMT</pubDate>
+      <enclosure url="https://github.com/Edwardrem/Reachly/releases/download/v1.0.0/Reachly-1.0.0.dmg" length="15175808" type="application/octet-stream" sparkle:version="1" sparkle:shortVersionString="1.0.0"/>
+    </item>
+  </channel>
+</rss>
