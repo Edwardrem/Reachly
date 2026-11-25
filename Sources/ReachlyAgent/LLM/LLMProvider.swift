@@ -68,7 +68,7 @@ public enum LLMError: LocalizedError, Equatable {
 
     public var errorDescription: String? {
         switch self {
-        case .missingAPIKey: "No API key is set. Add one in Settings → Claude."
+        case .missingAPIKey: "No API key is set. Add one in Settings → AI Integration."
         case .invalidBaseURL(let url): "The endpoint URL is not valid: \(url)"
         case .httpStatus(let code, let body): "The API returned HTTP \(code). \(body)".trimmingCharacters(in: .whitespaces)
         case .api(let type, let message): "\(message) (\(type))"

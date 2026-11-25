@@ -95,7 +95,7 @@ final class AgentSettings {
         let kind = plan.configuration.kind
         let key = try await apiKey(for: plan)
         if key == nil, kind.requiresAPIKey {
-            throw AgentSetupError(message: "Add your \(kind.keyName) API key in Settings › Claude to start.")
+            throw AgentSetupError(message: "Add your \(kind.keyName) API key in Settings › AI Integration to start.")
         }
         return try plan.configuration.makeProvider(apiKey: key)
     }

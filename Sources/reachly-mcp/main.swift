@@ -110,7 +110,7 @@ func waitForServer() -> BridgeConfig? {
             let ping = Data(#"{"jsonrpc":"2.0","id":"bridge-ping","method":"ping"}"#.utf8)
             if case .response = post(ping, config: config) { return config }
             if case .failed(let status, _) = post(ping, config: config), status == 401 {
-                log("the token in mcp.json was rejected; turn the MCP server off and on in Reachly → Settings → Claude")
+                log("the token in mcp.json was rejected; turn the MCP server off and on in Reachly → Settings → AI Integration")
                 return nil
             }
         }
@@ -121,7 +121,7 @@ func waitForServer() -> BridgeConfig? {
         }
         Thread.sleep(forTimeInterval: 0.5)
     }
-    log("Reachly's MCP server did not answer. Enable it in Reachly → Settings → Claude.")
+    log("Reachly's MCP server did not answer. Enable it in Reachly → Settings → AI Integration.")
     return nil
 }
 

@@ -128,7 +128,7 @@ conversations. Your real hosts never leave your Mac.
 - **MCP server**: the same tools over the Model Context Protocol (streamable
   HTTP on localhost with a bearer token, plus a stdio bridge inside the app
   bundle) so Claude Desktop, Claude Code or any MCP client drive your servers
-  with their own subscription. Settings → Claude shows the one-line config for
+  with their own subscription. Settings → AI Integration shows the one-line config for
   each client. The guardrails and audit log apply identically.
 - **Serial consoles**: saved profiles for `/dev/cu.*` devices with baud rate,
   data bits, parity, stop bits, flow control, what Return sends, LF → CR LF

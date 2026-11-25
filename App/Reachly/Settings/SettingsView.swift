@@ -5,7 +5,7 @@ struct SettingsView: View {
     @State private var tab = SettingsView.initialTab
 
     /// Debug builds take `--settings-tab=<name>` (general, appearance, security, known-hosts, data,
-    /// claude, cloud, updates) so a UI check can open Settings on one pane.
+    /// ai-integration, cloud, updates) so a UI check can open Settings on one pane.
     private static var initialTab: String {
         #if DEBUG
         if let argument = CommandLine.arguments.first(where: { $0.hasPrefix("--settings-tab=") }) {
@@ -33,8 +33,8 @@ struct SettingsView: View {
                 .tabItem { Label("Data", systemImage: "externaldrive") }
                 .tag("data")
             ClaudeSettingsView()
-                .tabItem { Label("Claude", systemImage: "sparkles") }
-                .tag("claude")
+                .tabItem { Label("AI Integration", systemImage: "sparkles") }
+                .tag("ai-integration")
             CloudSettingsView()
                 .tabItem { Label("Cloud", systemImage: "cloud") }
                 .tag("cloud")
