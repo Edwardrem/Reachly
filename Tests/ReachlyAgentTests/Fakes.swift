@@ -2,6 +2,13 @@ import Foundation
 import ReachlyCore
 @testable import ReachlyAgent
 
+/// A stream that sends some reasoning and text, then fails.
+struct FakeStreamFailure: Sendable {
+    var thinking = ""
+    var text = ""
+    var error: any Error
+}
+
 /// A scripted model: each call streams the next response.
 final class FakeProvider: LLMProvider, @unchecked Sendable {
     var responses: [LLMResponse]
@@ -11,6 +18,8 @@ final class FakeProvider: LLMProvider, @unchecked Sendable {
     var holdBeforeDone: (@Sendable () async -> Void)?
     /// Awaited once the stream has finished, so a test can tell it has unwound.
     var afterStream: (@Sendable () async -> Void)?
+    /// Requests, by index from 0, that fail instead of taking the next response.
+    var failures: [Int: FakeStreamFailure] = [:]
 
     init(responses: [LLMResponse]) {
         self.responses = responses
@@ -31,7 +40,16 @@ final class FakeProvider: LLMProvider, @unchecked Sendable {
     }
 
     func stream(_ request: LLMRequest) -> AsyncThrowingStream<LLMStreamEvent, Error> {
+        let index = requests.count
         requests.append(request)
+        if let failure = failures[index] {
+            return AsyncThrowingStream { continuation in
+                continuation.yield(.started(model: "fake-model"))
+                if !failure.thinking.isEmpty { continuation.yield(.thinkingDelta(failure.thinking)) }
+                if !failure.text.isEmpty { continuation.yield(.textDelta(failure.text)) }
+                continuation.finish(throwing: failure.error)
+            }
+        }
         let response = responses.isEmpty ? Self.reply("(no scripted reply)") : responses.removeFirst()
         let delay = delayBetweenDeltas
         let hold = holdBeforeDone
