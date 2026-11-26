@@ -8,6 +8,9 @@ public enum AgentActionSource: String, Codable, Sendable, CaseIterable {
 }
 
 /// What the guardrails decided about an agent action.
+///
+/// Stored by raw value (`AgentAuditEntry.decisionRaw`) and exported as JSON:
+/// add cases, never rename or remove one.
 public enum AgentAuditDecision: String, Codable, Sendable, CaseIterable {
     /// Allowed by the host's mode without asking (read-only list or allowlist match).
     case autoAllowed = "auto-allowed"
@@ -18,6 +21,9 @@ public enum AgentAuditDecision: String, Codable, Sendable, CaseIterable {
     /// Refused by read-only mode or another rule; the user was not asked.
     case blocked
     case cancelled
+    /// The user sent a comment back from the approval sheet instead of running
+    /// the command. The comment is in the entry's decision detail.
+    case changesRequested = "changes-requested"
 
     public var displayName: String {
         switch self {
@@ -27,13 +33,14 @@ public enum AgentAuditDecision: String, Codable, Sendable, CaseIterable {
         case .denied: "Denied"
         case .blocked: "Blocked"
         case .cancelled: "Cancelled"
+        case .changesRequested: "Changes requested"
         }
     }
 
     public var ran: Bool {
         switch self {
         case .autoAllowed, .approved, .edited: true
-        case .denied, .blocked, .cancelled: false
+        case .denied, .blocked, .cancelled, .changesRequested: false
         }
     }
 }

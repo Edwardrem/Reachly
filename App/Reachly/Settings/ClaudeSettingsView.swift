@@ -401,6 +401,7 @@ private struct AgentAuditRow: View {
         case .denied: "hand.raised"
         case .blocked: "nosign"
         case .cancelled: "stop.circle"
+        case .changesRequested: "text.bubble"
         }
     }
 
@@ -409,6 +410,7 @@ private struct AgentAuditRow: View {
         case .autoAllowed, .approved, .edited: .green
         case .denied, .blocked: .red
         case .cancelled: .orange
+        case .changesRequested: .blue
         }
     }
 }

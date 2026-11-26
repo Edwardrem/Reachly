@@ -67,7 +67,37 @@ public enum AgentApprovalResponse: Sendable, Equatable {
     case approved
     /// The user changed the command; the new text runs instead.
     case edited(String)
+    /// The user wants changes before anything runs. Nothing runs: the model
+    /// gets the comment (and the edited command as a suggestion, when there is
+    /// one) and can call the tool again with a revised command.
+    case requestChanges(comment: String, editedCommand: String?)
     case denied
+
+    /// The longest comment the approval sheet sends, in characters.
+    public static let commentLimit = 2_000
+
+    /// The comment as it is sent: trimmed and clipped to `commentLimit`.
+    /// Nil when nothing is left, so an empty comment can't be sent.
+    public static func normalizedComment(_ text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return String(trimmed.prefix(commentLimit)).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The sheet's Send answer for a comment and the command as it stands in
+    /// the editor. The edit is kept only when it differs from the proposal and
+    /// is not empty. Nil when the comment is empty.
+    public static func changeRequest(comment: String, command: String, proposed: String) -> AgentApprovalResponse? {
+        guard let comment = normalizedComment(comment) else { return nil }
+        return .requestChanges(comment: comment, editedCommand: suggestion(command, proposed: proposed))
+    }
+
+    /// The edited command worth passing back, or nil when it is empty or unchanged.
+    static func suggestion(_ edited: String?, proposed: String) -> String? {
+        guard let trimmed = edited?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty,
+              trimmed != proposed.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+        return trimmed
+    }
 }
 
 /// What a command produced.
