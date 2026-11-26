@@ -21,3 +21,6 @@ sparkle_private_key*
 
 # Local packaging output (Scripts/package.sh)
 dist/
+
+# Demo fleet keys, logs and generated configs (demo/fleet/up.sh)
+demo/fleet/.state/
