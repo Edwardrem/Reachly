@@ -54,7 +54,10 @@ public struct CaimexModelCatalogue: Sendable {
         request.timeoutInterval = Self.timeout
 
         // Transport errors and cancellation keep their own type; the view decides whether to show them.
-        let (bytes, response) = try await session.bytes(for: request)
+        // The request can carry the Caimex key: never follow a redirect to another server.
+        let redirects = EndpointRedirectGuard(for: Self.modelsURL)
+        let (bytes, response) = try await session.bytes(for: request, delegate: redirects)
+        try redirects.throwIfRefused()
 
         guard let http = response as? HTTPURLResponse else {
             throw LLMError.invalidResponse("not an HTTP response")
