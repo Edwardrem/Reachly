@@ -232,4 +232,29 @@ struct ProviderKeyTests {
         #expect(LLMProviderConfiguration.Kind.caimex.keyName == "Caimex")
         #expect(LLMProviderConfiguration.Kind.openAICompatible.keyName == "endpoint")
     }
+
+    @Test func eachHostedProviderLinksToItsOwnKeyPage() {
+        #expect(LLMProviderConfiguration.Kind.anthropic.keyPageURL?.absoluteString == "https://platform.claude.com/settings/keys")
+        #expect(LLMProviderConfiguration.Kind.caimex.keyPageURL?.absoluteString == "https://caimex.ai/api-keys")
+        for kind in LLMProviderConfiguration.Kind.allCases {
+            guard let url = kind.keyPageURL else { continue }
+            #expect(url.scheme == "https", "\(kind) key page must be HTTPS")
+            #expect(kind.keyPageLocation?.isEmpty == false, "\(kind) links to a page, so it says where the page is")
+        }
+    }
+
+    @Test func aTypedEndpointHasNoKeyPage() {
+        // The key comes from the user's own server, so there is nowhere to send them.
+        #expect(LLMProviderConfiguration.Kind.openAICompatible.keyPageURL == nil)
+        #expect(LLMProviderConfiguration.Kind.openAICompatible.keyPageLocation == nil)
+    }
+
+    @Test func theKeyPageLocationNamesTheConsolePath() {
+        let anthropic = LLMProviderConfiguration.Kind.anthropic.keyPageLocation ?? ""
+        #expect(anthropic.hasPrefix("Claude Console › Settings › API keys"))
+        #expect(anthropic.contains("shown only once"))
+        let caimex = LLMProviderConfiguration.Kind.caimex.keyPageLocation ?? ""
+        #expect(caimex.hasPrefix("Caimex › Developer › API keys"))
+        #expect(caimex.contains("signed in"))
+    }
 }

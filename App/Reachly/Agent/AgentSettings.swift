@@ -17,17 +17,22 @@ final class AgentSettings {
             // The key and its state belong to the selected kind; finish a pending move first.
             if configuration.kind != oldValue.kind {
                 migration.retryPendingMove()
-                hasAPIKey = migration.hasKey(for: configuration.kind)
+                refreshKeyState()
             }
         }
     }
     private(set) var hasAPIKey: Bool
+    /// The preview of the selected kind's saved key, such as `sk-ant-…a1b2`, read from UserDefaults. Nil
+    /// when there is no key, or the key was saved before previews existed.
+    private(set) var savedKeyHint: String?
     /// Bumped whenever the selected kind's saved key changes, so the panel rebuilds its provider even
     /// when the configuration (kind, model, URL) looks the same.
     private(set) var keyVersion = 0
 
     /// One migration for the app: run once in `init`, then consulted for every key operation.
     private let migration: APIKeyMigration
+    /// Written only after the Keychain write or delete it describes has succeeded.
+    private let hints = APIKeyHintStore()
 
     private init() {
         let stored: LLMProviderConfiguration
@@ -44,6 +49,7 @@ final class AgentSettings {
         migration.run(legacyKind: stored.kind)
         self.migration = migration
         hasAPIKey = migration.hasKey(for: stored.kind)
+        savedKeyHint = hasAPIKey ? hints.hint(for: stored.kind) : nil
     }
 
     private func save() {
@@ -52,11 +58,18 @@ final class AgentSettings {
         }
     }
 
+    /// Re-reads whether the selected kind has a key, and its preview. It only asks the Keychain whether
+    /// the item exists: no secret is read and the vault stays locked, so Settings may call it on appear.
+    func refreshKeyState() {
+        hasAPIKey = migration.hasKey(for: configuration.kind)
+        savedKeyHint = hasAPIKey ? hints.hint(for: configuration.kind) : nil
+    }
+
     /// Captures the provider's inputs before any prompt, so a picker change while Touch ID is up cannot
     /// retarget the key, the host or the recorded version. Retries a pending move first.
     func providerPlan() -> ProviderBuildPlan {
         migration.retryPendingMove()
-        hasAPIKey = migration.hasKey(for: configuration.kind)
+        refreshKeyState()
         return migration.plan(for: configuration, keyVersion: keyVersion)
     }
 
@@ -76,16 +89,24 @@ final class AgentSettings {
         guard let account = migration.accountForSaving(kind) else {
             throw AgentSetupError(message: "Reachly is still moving the key you saved before. Try again in a moment; nothing was saved.")
         }
-        try SecretStore.shared.set(trimmed, account: account, label: kind.keychainLabel)
+        // The preview is recorded for the kind captured above, and only once the Keychain write returns.
+        try hints.save(trimmed, for: kind) {
+            try SecretStore.shared.set(trimmed, account: account, label: kind.keychainLabel)
+        }
         hasAPIKey = true
+        savedKeyHint = hints.hint(for: kind)
         keyVersion += 1
     }
 
     func removeAPIKey() throws {
         migration.retryPendingMove()
-        guard let account = migration.account(for: configuration.kind) else { return }
-        try SecretStore.shared.delete(account: account)
+        let kind = configuration.kind
+        guard let account = migration.account(for: kind) else { return }
+        try hints.remove(for: kind) {
+            try SecretStore.shared.delete(account: account)
+        }
         hasAPIKey = false
+        savedKeyHint = nil
         keyVersion += 1
     }
 
