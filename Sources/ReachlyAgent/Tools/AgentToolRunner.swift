@@ -46,6 +46,8 @@ public final class AgentToolRunner {
     public let host: any AgentToolHost
     public let source: AgentActionSource
     public var conversationID: UUID?
+    /// Who calls through this runner, for the approval sheet, when it is not the panel's own provider.
+    public var requester: String?
     /// Bytes of stdout/stderr passed to the model per command.
     public var outputLimit = 48 * 1024
     public var defaultTimeout: Duration = .seconds(120)
@@ -278,7 +280,7 @@ public final class AgentToolRunner {
         case .ask(let why):
             let request = AgentApprovalRequest(
                 source: source, host: target, tool: tool.rawValue, command: command, reason: reason, detail: why,
-                isDestructive: CommandGuard.destructiveMatch(command) != nil)
+                isDestructive: CommandGuard.destructiveMatch(command) != nil, requester: requester)
             let response = await host.approve(request)
             if Task.isCancelled {
                 recordNotRun(tool: tool, on: target, command: command, reason: reason, decision: .cancelled, detail: why)

@@ -216,7 +216,7 @@ struct APIKeyHintTests {
             #expect(hints.hint(for: .anthropic) == "sk-ant-api03-…a1b2")
             #expect(hints.hint(for: .caimex) == "…c3d4")
             #expect(hints.hint(for: .openAICompatible) == nil)
-            #expect(Set(LLMProviderConfiguration.Kind.allCases.map(APIKeyHintStore.defaultsKey(for:))).count == 3)
+            #expect(Set(LLMProviderConfiguration.Kind.allCases.map(APIKeyHintStore.defaultsKey(for:))).count == LLMProviderConfiguration.Kind.allCases.count)
         }
     }
 

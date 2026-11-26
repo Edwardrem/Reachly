@@ -136,7 +136,7 @@ final class ProviderDetector {
 
     /// The app's own environment with the tool's folder and the usual bin folders on PATH, since an app
     /// opened from the Finder gets a short PATH and some CLIs start helpers by name. Colour is turned off.
-    nonisolated private static func toolEnvironment(for executable: String, home: URL) -> [String: String] {
+    nonisolated static func toolEnvironment(for executable: String, home: URL) -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
         let folders = [URL(fileURLWithPath: executable).deletingLastPathComponent().path]
             + AIProviderLocations.binDirectories(home: home.path)
@@ -192,6 +192,17 @@ final class ProviderDetector {
         case .copyClaudeDesktopSnippet:
             copy(mcp.claudeDesktopSnippet)
             return .done("Copied. Paste it into claude_desktop_config.json, then restart Claude Desktop.")
+        case .useQoderInChat:
+            // The CLI the prompt showed is the one the panel runs.
+            guard let command = prompt?.command else { return .failed("The Qoder CLI is no longer found. Nothing was changed.") }
+            var next = settings.configuration
+            next.kind = .qoder
+            next.acpCommandPath = command.executable
+            settings.configuration = next
+            let binary = URL(fileURLWithPath: command.executable).lastPathComponent
+            let done = "Qoder is selected for the chat panel. Send a message there to start it. It uses Qoder's own sign-in: if you haven't signed in yet, run `\(binary) login` in Terminal first."
+            if let problem = await turnOnServer(mcp) { return .failed(done + " But Reachly's MCP server didn't start, so Qoder can't reach your servers: " + problem.message) }
+            return .done(done)
         case .showQoderAppSteps, .openLink:
             // The steps are the prompt itself and a link opens in the browser; nothing to run.
             return nil

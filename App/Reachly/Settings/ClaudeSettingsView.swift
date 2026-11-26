@@ -93,6 +93,8 @@ struct ClaudeSettingsView: View {
                         .foregroundStyle(.secondary)
                 } else if settings.configuration.kind == .caimex {
                     caimexModelSection
+                } else if settings.configuration.kind == .qoder {
+                    qoderSection
                 } else {
                     TextField("Base URL", text: configuration.baseURL, prompt: Text("http://localhost:11434/v1"))
                         .font(.body.monospaced())
@@ -103,6 +105,8 @@ struct ClaudeSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            // Qoder signs in itself; Reachly keeps no key for it.
+            if kind.usesAPIKey {
             Section("API key") {
                 HStack {
                     keyField
@@ -151,6 +155,7 @@ struct ClaudeSettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+            }
             }
             AIProvidersFoundSection()
             Section("MCP server") {
@@ -291,6 +296,23 @@ struct ClaudeSettingsView: View {
         caimexLoading = false
     }
 
+    /// Qoder (ACP): the CLI the panel runs, and what running it means.
+    @ViewBuilder
+    private var qoderSection: some View {
+        TextField("Qoder CLI", text: Binding(
+            get: { settings.configuration.acpCommandPath ?? "" },
+            set: { settings.configuration.acpCommandPath = $0.isEmpty ? nil : $0 }), prompt: Text("/usr/local/bin/qoder"))
+            .font(.body.monospaced())
+        Text("When you send a message in the chat panel, Reachly runs this CLI in ACP mode (--acp), in a folder of its own under Application Support. Qoder uses its own sign-in and models, which Reachly never reads. It reaches your servers only through Reachly's MCP server, under the same guardrails, approval sheet and audit log. Qoder's own tools run on this Mac under Qoder's rules, and Reachly asks you before each one. Use in Chat Panel on the Qoder row below fills this in.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        if !mcp.isEnabled {
+            Label("Turn on the MCP server below: Qoder reaches your servers through it.", systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        }
+    }
+
     private var keyPlaceholder: String {
         if settings.keyOriginMismatch != nil { return "Paste a key for this endpoint" }
         if settings.hasAPIKey { return "Saved in the Keychain — paste to replace" }
@@ -298,6 +320,7 @@ struct ClaudeSettingsView: View {
         case .anthropic: return "sk-ant-…"
         case .caimex: return "Caimex API key"
         case .openAICompatible: return "Optional key for a hosted endpoint"
+        case .qoder: return "Qoder uses its own sign-in"
         }
     }
 
@@ -315,6 +338,8 @@ struct ClaudeSettingsView: View {
             return "Bring your own Caimex key: it is stored in the Keychain and sent only to the Caimex gateway. Each provider keeps its own key."
         case .openAICompatible:
             return "Optional for local servers. A key here is stored in the Keychain and sent only to the scheme, host and port of the base URL above. Each provider keeps its own key."
+        case .qoder:
+            return "Qoder signs in itself. Reachly never reads or stores Qoder's credentials."
         }
     }
 

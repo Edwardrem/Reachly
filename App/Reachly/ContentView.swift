@@ -83,11 +83,19 @@ struct ContentView: View {
                         .panelChrome()
                 }
         }
+        // One queue for both kinds of question, so a command approval and an agent's own permission request
+        // never try to present at once: command approvals first, then the agent's requests.
         .sheet(item: Binding(
-            get: { appState.pendingApprovals.first },
-            set: { if $0 == nil { appState.pendingApprovals.first?.resume(.denied) } })) { prompt in
-            AgentApprovalSheet(prompt: prompt, assistantName: agent.assistantName)
-                .themedSheet()
+            get: { AgentQuestion.first(approvals: appState.pendingApprovals, permissions: appState.pendingAgentPermissions) },
+            set: { if $0 == nil { AgentQuestion.first(approvals: appState.pendingApprovals, permissions: appState.pendingAgentPermissions)?.dismiss() } })) { question in
+            switch question {
+            case .approval(let prompt):
+                AgentApprovalSheet(prompt: prompt, assistantName: agent.assistantName)
+                    .themedSheet()
+            case .permission(let prompt):
+                AgentPermissionSheet(prompt: prompt)
+                    .themedSheet()
+            }
         }
         .sheet(item: $appState.hostEditor) { target in
             HostEditorView(target: target)
@@ -173,8 +181,17 @@ struct ContentView: View {
             restoreWorkspace()
             openWindowsRequestedOnLaunch()
             syncForwardingRules()
+            // Qoder in the panel reaches the servers through this MCP server.
+            agent.mcpServer = mcp
             await mcp.apply()
             if AIIntegrationOnboarding.shouldPresentOnLaunch() { appState.isShowingAISetup = true }
+        }
+        // An external agent's process lives while the panel is open; one still answering finishes first.
+        .onChange(of: appState.isShowingAgentPanel) { _, showing in
+            if !showing { agent.stopExternalAgentIfIdle() }
+        }
+        .onChange(of: agent.isReplying) { _, replying in
+            if !replying, !appState.isShowingAgentPanel { agent.stopExternalAgentIfIdle() }
         }
         .onChange(of: workspace.changeCount) { _, _ in scheduleSave() }
         .onChange(of: forwardRules.count) { _, _ in syncForwardingRules() }

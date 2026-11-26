@@ -78,8 +78,8 @@ public struct AnthropicProvider: LLMProvider {
                     blocks.append(["type": "tool_result", "tool_use_id": .string(toolUseID), "content": .string(content), "is_error": .bool(isError)])
                 case .attachment(let file):
                     if message.role == .user { blocks.append(attachmentBlock(file)) }
-                case .failure:
-                    // Display only; `repaired` has already dropped failure rows.
+                case .failure, .agentToolCall, .plan, .notice:
+                    // Display only; `repaired` has already dropped them.
                     break
                 }
             }

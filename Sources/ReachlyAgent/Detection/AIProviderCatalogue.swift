@@ -2,7 +2,7 @@ import Foundation
 
 /// A page a row or suggestion links to.
 public enum AIProviderLink: String, Sendable, Hashable, CaseIterable {
-    case anthropicKeys, caimexKeys, openAIKeys, lmStudio, ollama
+    case anthropicKeys, caimexKeys, openAIKeys, lmStudio, ollama, qoderCLI
 
     public var title: String {
         switch self {
@@ -11,6 +11,7 @@ public enum AIProviderLink: String, Sendable, Hashable, CaseIterable {
         case .openAIKeys: "Get an OpenAI Key"
         case .lmStudio: "Get LM Studio"
         case .ollama: "Get Ollama"
+        case .qoderCLI: "Get the Qoder CLI"
         }
     }
 
@@ -21,6 +22,7 @@ public enum AIProviderLink: String, Sendable, Hashable, CaseIterable {
         case .openAIKeys: URL(string: "https://platform.openai.com/api-keys")!
         case .lmStudio: URL(string: "https://lmstudio.ai")!
         case .ollama: URL(string: "https://ollama.com/download")!
+        case .qoderCLI: URL(string: "https://docs.qoder.com/en/cli/quick-start")!
         }
     }
 }
@@ -39,6 +41,8 @@ public enum AIProviderAction: Sendable, Hashable {
     case connectQoderCLI
     /// The steps for adding Reachly in the Qoder app, with the bridge path to copy.
     case showQoderAppSteps
+    /// Selects Qoder (ACP) as the chat panel's provider, run from the Qoder CLI found here.
+    case useQoderInChat
     /// Points the OpenAI-compatible endpoint at api.openai.com; the key is pasted by the user.
     case setUpOpenAIEndpoint
     /// Saves the key from Reachly's own environment for its provider and selects that provider.
@@ -53,6 +57,7 @@ public enum AIProviderAction: Sendable, Hashable {
         case .connectClaudeCode, .connectClaudeDesktop, .connectQoderCLI: "Connect"
         case .copyClaudeDesktopSnippet: "Copy Config"
         case .showQoderAppSteps: "Show Steps"
+        case .useQoderInChat: "Use in Chat Panel"
         case .setUpOpenAIEndpoint: "Set Up OpenAI API"
         case .useEnvironmentKey: "Use Key"
         case .turnOnMCPServer: "Turn On MCP Server"
@@ -304,8 +309,27 @@ public enum AIProviderCatalogue {
     static func qoderRow(_ qoder: AIProviderMachineFacts.Qoder, reachly: ReachlyAIState) -> AIProviderRow {
         let title = qoder.cliPath == nil ? "Qoder" : (qoder.appInstalled ? "Qoder and Qoder CLI" : "Qoder CLI")
         let note = "Qoder keeps its own sign-in; Reachly only offers it Reachly's tools over MCP."
+        // The chat panel runs the CLI over ACP; the Qoder app alone has no ACP mode.
+        let chatNote = "In the chat panel, Qoder's own tools run on this Mac under Qoder's rules, and Reachly's tools run on servers under Reachly's."
+        if let cli = qoder.cliPath, reachly.kind == .qoder {
+            let inUse = reachly.acpCommandPath == cli
+            let serverOff = !reachly.mcpServerEnabled
+            var actions: [AIProviderAction] = []
+            if !inUse { actions.append(.useQoderInChat) }
+            if serverOff { actions.append(.turnOnMCPServer) }
+            return AIProviderRow(
+                id: .qoder, title: title,
+                detail: serverOff
+                    ? "Selected for the chat panel, but Reachly's MCP server is off, so Qoder can't reach your servers."
+                    : (inUse ? "Answers in Reachly's chat panel over ACP." : "Selected for the chat panel from another path. Use this copy instead?"),
+                status: serverOff || !inUse ? .needsAction : .inUse,
+                actions: actions,
+                note: chatNote + " " + note)
+        }
         if case .connected = qoder.config {
-            return connectedRow(id: .qoder, title: title, client: "Qoder", reachly: reachly, note: note)
+            let connected = connectedRow(id: .qoder, title: title, client: "Qoder", reachly: reachly, note: note)
+            guard qoder.cliPath != nil else { return connected }
+            return AIProviderRow(id: connected.id, title: connected.title, detail: connected.detail, status: connected.status, actions: connected.actions + [.useQoderInChat], note: connected.note)
         }
         let unreadable = qoder.config == .unreadable
         if let problem = reachly.bridgeLocationProblem {
@@ -316,15 +340,15 @@ public enum AIProviderCatalogue {
                 id: .qoder, title: title,
                 detail: unreadable ? "Found. Its settings file couldn't be read." : "Found. Not connected to Reachly's MCP server.",
                 status: .ready,
-                actions: [.connectQoderCLI],
+                actions: [.useQoderInChat, .connectQoderCLI],
                 note: note)
         }
         return AIProviderRow(
             id: .qoder, title: title,
             detail: unreadable ? "Installed. Its settings file couldn't be read." : "Installed. Not connected to Reachly's MCP server.",
             status: .ready,
-            actions: [.showQoderAppSteps],
-            note: "The Qoder CLI isn't installed, so Reachly is added in the Qoder app's settings. " + note)
+            actions: [.showQoderAppSteps, .openLink(.qoderCLI)],
+            note: "The Qoder CLI isn't installed, so Reachly is added in the Qoder app's settings. To chat with Qoder in Reachly's panel, install the Qoder CLI: the panel runs it in ACP mode. " + note)
     }
 
     static func openAIRow(_ apps: AIProviderMachineFacts.OpenAIApps, reachly: ReachlyAIState) -> AIProviderRow {
@@ -486,6 +510,15 @@ public enum AIProviderCatalogue {
                 steps: steps,
                 detail: reachly.bridgePath,
                 confirmTitle: nil)
+        case .useQoderInChat:
+            guard let cli = machine.qoder?.cliPath else { return notFound("The Qoder CLI") }
+            let command = MCPConnectCommand(executable: cli, arguments: ["--acp"])
+            return AIProviderPrompt(
+                title: "Use Qoder in the chat panel?",
+                message: "Reachly selects Qoder (ACP) as the chat panel's provider. When you send a message there, Reachly runs this command and talks to it over the Agent Client Protocol; if Qoder doesn't take --acp, Reachly runs it with acp instead. It runs in a folder Reachly made for it in Application Support, not your home folder, and signs in with Qoder's own sign-in, which Reachly never reads. Qoder reaches your servers only through Reachly's MCP server, so its commands there go through Reachly's guardrails, approval sheet and audit log. Qoder's own tools run on this Mac under Qoder's rules, and Reachly asks you before each one it wants to use.\(serverNote)",
+                detail: command.displayString(home: home),
+                confirmTitle: "Use Qoder",
+                command: command)
         case .setUpOpenAIEndpoint:
             return AIProviderPrompt(
                 title: "Set up the OpenAI API?",

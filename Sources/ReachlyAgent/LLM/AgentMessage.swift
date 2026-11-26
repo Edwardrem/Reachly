@@ -60,6 +60,12 @@ public struct AgentMessage: Codable, Sendable, Equatable, Identifiable {
         }
         return nil
     }
+
+    /// Every block is for the reader only (an external agent's tool calls, a plan, a notice), so nothing of the
+    /// turn is sent to a model and it plays no part in tool-call pairing.
+    public var isDisplayOnly: Bool {
+        !blocks.isEmpty && blocks.allSatisfy(\.isDisplayOnly)
+    }
 }
 
 /// Why a reply did not finish, kept in the transcript where it stopped and
@@ -136,9 +142,24 @@ public enum AgentContentBlock: Codable, Sendable, Equatable {
     case attachment(AgentAttachment)
     /// Marks a failure row (see `AgentFailure`). Display only: never sent.
     case failure(AgentFailure)
+    /// A tool call an external agent (ACP) ran with its own tools. Display only: never sent.
+    case agentToolCall(AgentToolActivity)
+    /// An external agent's plan for the turn. Display only: never sent.
+    case plan([AgentPlanEntry])
+    /// A note for the reader that is not part of the reply, such as an external agent starting a new
+    /// session. Display only: never sent.
+    case notice(String)
+
+    /// Shown in the panel and saved, but never sent to a model.
+    public var isDisplayOnly: Bool {
+        switch self {
+        case .failure, .agentToolCall, .plan, .notice: true
+        case .text, .thinking, .redactedThinking, .toolUse, .toolResult, .attachment: false
+        }
+    }
 
     private enum CodingKeys: String, CodingKey {
-        case type, text, signature, data, id, name, input, toolUseID = "tool_use_id", content, isError = "is_error", file, failure
+        case type, text, signature, data, id, name, input, toolUseID = "tool_use_id", content, isError = "is_error", file, failure, activity, entries
     }
 
     public init(from decoder: any Decoder) throws {
@@ -158,6 +179,12 @@ public enum AgentContentBlock: Codable, Sendable, Equatable {
             self = .attachment(try container.decode(AgentAttachment.self, forKey: .file))
         case "failure":
             self = .failure(try container.decode(AgentFailure.self, forKey: .failure))
+        case "agent_tool_call":
+            self = .agentToolCall(try container.decode(AgentToolActivity.self, forKey: .activity))
+        case "plan":
+            self = .plan(try container.decodeIfPresent([AgentPlanEntry].self, forKey: .entries) ?? [])
+        case "notice":
+            self = .notice(try container.decodeIfPresent(String.self, forKey: .text) ?? "")
         case let other:
             throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "Unknown block type \(other)")
         }
@@ -192,6 +219,15 @@ public enum AgentContentBlock: Codable, Sendable, Equatable {
         case .failure(let failure):
             try container.encode("failure", forKey: .type)
             try container.encode(failure, forKey: .failure)
+        case .agentToolCall(let activity):
+            try container.encode("agent_tool_call", forKey: .type)
+            try container.encode(activity, forKey: .activity)
+        case .plan(let entries):
+            try container.encode("plan", forKey: .type)
+            try container.encode(entries, forKey: .entries)
+        case .notice(let text):
+            try container.encode("notice", forKey: .type)
+            try container.encode(text, forKey: .text)
         }
     }
 }
@@ -232,12 +268,16 @@ public enum AgentTranscript {
         // The call ids of the immediately preceding assistant turn, still unanswered.
         var pending: [String] = []
 
-        for message in messages {
-            if message.failure != nil {
+        for var message in messages {
+            if message.failure != nil || message.isDisplayOnly {
                 // Neither a reply nor a user turn: it answers no call and leaves
                 // the pending ones for the next user turn.
                 if keepingFailures { out.append(message) }
                 continue
+            }
+            if !keepingFailures {
+                // What an external agent did with its own tools, its plan and notices are for the reader.
+                message.blocks.removeAll(where: \.isDisplayOnly)
             }
             if message.role == .assistant {
                 if !pending.isEmpty {
@@ -331,7 +371,11 @@ public enum AgentTranscript {
                     let detail = input["command"]?.stringValue ?? input["path"]?.stringValue ?? input["remote_path"]?.stringValue ?? input["file_name"]?.stringValue
                     let host = input["host"]?.stringValue.map { " on \($0)" } ?? ""
                     lines.append("[\(name)\(host)\(detail.map { ": \($0)" } ?? "")]")
-                case .thinking, .redactedThinking, .toolResult, .failure:
+                case .agentToolCall(let activity):
+                    lines.append("[\(activity.title)]")
+                case .notice(let text):
+                    lines.append("[\(text)]")
+                case .thinking, .redactedThinking, .toolResult, .failure, .plan:
                     break
                 }
             }
