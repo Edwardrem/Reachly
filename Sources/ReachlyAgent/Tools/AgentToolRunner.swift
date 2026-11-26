@@ -25,6 +25,8 @@ public final class AgentToolRunner {
         case cancelled
         case localFile(String)
         case document(String)
+        /// An edit arrived for a tool whose sheet line is a stand-in; nothing ran.
+        case editNotApplicable(String)
 
         public var errorDescription: String? {
             switch self {
@@ -36,6 +38,7 @@ public final class AgentToolRunner {
             case .cancelled: "The action was cancelled."
             case .localFile(let detail): detail
             case .document(let detail): detail
+            case .editNotApplicable(let tool): "The user's edit can't be applied to \(tool); nothing ran."
             }
         }
     }
@@ -285,6 +288,13 @@ public final class AgentToolRunner {
             case .approved:
                 return (command, .approved, why)
             case .edited(let text):
+                guard request.isCommandEditable else {
+                    // The sheet shows these read-only. The edited text is not
+                    // this tool's input, so never run the original in its place.
+                    let failure = Failure.editNotApplicable(tool.rawValue)
+                    recordNotRun(tool: tool, on: target, command: command, reason: reason, decision: .denied, detail: failure.localizedDescription)
+                    throw failure
+                }
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty else {
                     recordNotRun(tool: tool, on: target, command: command, reason: reason, decision: .denied, detail: "edited to an empty command")
@@ -298,7 +308,7 @@ public final class AgentToolRunner {
                     throw Failure.denied("Do not retry it unchanged; ask the user how to proceed if it is needed.")
                 }
                 // Only run_command's text is real input; the audit records what the model was told.
-                let suggestion = request.sendsEditWithComment ? AgentApprovalResponse.suggestion(edited, proposed: command) : nil
+                let suggestion = request.isCommandEditable ? AgentApprovalResponse.suggestion(edited, proposed: command) : nil
                 let detail = AgentAuditDecision.changesRequestedDetail(guardrail: why, comment: comment, suggestion: suggestion)
                 recordNotRun(tool: tool, on: target, command: command, reason: reason, decision: .changesRequested, detail: detail)
                 throw ChangesRequested(feedback: Self.changesRequestedText(tool: tool, host: target, comment: comment, suggestion: suggestion))

@@ -6,6 +6,8 @@ import ReachlyCore
 /// Approve runs it as shown, editing runs the edited text, Deny tells the model no.
 /// A comment sends the request back instead: nothing runs, and the model gets the
 /// comment (and any edit) so it can propose a revised command in a new sheet.
+/// Only run_command's text can be edited; the other tools show a stand-in line
+/// that is not their real input, so it is read-only.
 struct AgentApprovalSheet: View {
     let prompt: AgentApprovalPrompt
     /// Who is answering in the panel. A request from an MCP client comes from Claude Desktop or Claude Code.
@@ -22,22 +24,17 @@ struct AgentApprovalSheet: View {
 
     private var request: AgentApprovalRequest { prompt.request }
     private var requesterName: String { request.source == .mcp ? "Claude" : assistantName }
-    private var isEdited: Bool { command != request.command }
+    private var isEdited: Bool { request.isCommandEditable && command != request.command }
     private var isEmpty: Bool { command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     /// What Send answers; nil while the comment is empty or only whitespace.
     private var changeRequest: AgentApprovalResponse? {
-        AgentApprovalResponse.changeRequest(comment: comment, command: command, proposed: request.command, includingEdit: request.sendsEditWithComment)
+        AgentApprovalResponse.changeRequest(comment: comment, command: command, proposed: request.command, includingEdit: request.isCommandEditable)
     }
     /// Send passes the edited command back too (run_command only, and only a real change).
     private var sendsEdit: Bool { changeRequest?.suggestedCommand != nil }
     /// The hint under the comment: what Send does, and how to run the command instead.
     private var commentHint: String {
-        var hint = "Nothing runs. \(requesterName) gets your comment\(sendsEdit ? " and your edit" : "") and can propose a revised command."
-        if isEdited && !request.sendsEditWithComment {
-            hint += " Edits to this line are not sent for \(request.tool); describe the change in the comment."
-        }
-        hint += " Clear the comment to \(sendsEdit ? "run your edit" : "run the command") instead."
-        return hint
+        "Nothing runs. \(requesterName) gets your comment\(sendsEdit ? " and your edit" : "") and can propose a revised command. Clear the comment to \(sendsEdit ? "run your edit" : "run the command") instead."
     }
     /// A comment is waiting to be sent, so Approve and Run Edited Command stay off:
     /// running the command would drop it.
@@ -72,13 +69,27 @@ struct AgentApprovalSheet: View {
             }
             VStack(alignment: .leading, spacing: 4) {
                 Text("Command").foregroundStyle(.secondary)
-                TextEditor(text: $command)
-                    .font(.body.monospaced())
-                    .scrollContentBackground(.hidden)
-                    .frame(minHeight: 64, maxHeight: 160)
-                    .padding(6)
-                    .background(palette.raised, in: Design.shape(Design.radiusMedium))
-                    .overlay(Design.shape(Design.radiusMedium).strokeBorder(request.isDestructive ? Color.red.opacity(0.6) : palette.separator))
+                Group {
+                    if request.isCommandEditable {
+                        TextEditor(text: $command)
+                            .scrollContentBackground(.hidden)
+                            .frame(minHeight: 64, maxHeight: 160)
+                    } else {
+                        // A stand-in for the tool's real input: shown, not editable.
+                        ScrollView {
+                            Text(request.command)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 5)
+                        }
+                        .frame(maxHeight: 160)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .font(.body.monospaced())
+                .padding(6)
+                .background(palette.raised, in: Design.shape(Design.radiusMedium))
+                .overlay(Design.shape(Design.radiusMedium).strokeBorder(request.isDestructive ? Color.red.opacity(0.6) : palette.separator))
                 Text(request.detail)
                     .font(.caption)
                     .foregroundStyle(request.isDestructive ? .red : .secondary)

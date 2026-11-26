@@ -236,7 +236,7 @@ struct ApprovalFeedbackTests {
         let transfer = await runner.call(name: AgentToolName.sftpTransfer.rawValue, input: ["host": "web-01", "direction": "upload", "remote_path": "/tmp/site.tar.gz", "local_path": .string(upload.path), "reason": "deploy"])
         let write = await runner.call(name: AgentToolName.writeFile.rawValue, input: ["host": "web-01", "path": "/etc/motd", "contents": "hello", "reason": "banner"])
 
-        #expect(host.approvalRequests.map(\.sendsEditWithComment) == [false, false])
+        #expect(host.approvalRequests.map(\.isCommandEditable) == [false, false])
         #expect(host.executed.isEmpty)
         for (result, tool) in [(transfer, "sftp_transfer"), (write, "write_file")] {
             #expect(!result.isError)
@@ -256,6 +256,61 @@ struct ApprovalFeedbackTests {
         // A whitespace-only edit is no edit: nothing to send, nothing to mention.
         #expect(AgentApprovalResponse.changeRequest(comment: "x", command: "df -h \n", proposed: "df -h")?.suggestedCommand == nil)
         #expect(AgentApprovalResponse.approved.suggestedCommand == nil)
+    }
+
+    @Test func onlyRunCommandIsEditable() {
+        for tool in AgentToolName.allCases {
+            let request = AgentApprovalRequest(source: .agentPanel, host: FakeToolHost.web, tool: tool.rawValue, command: "x", reason: "", detail: "", isDestructive: false)
+            #expect(request.isCommandEditable == (tool == .runCommand), "\(tool.rawValue)")
+        }
+    }
+
+    @Test func editsToStandInLinesRunNothing() async throws {
+        let temp = FileManager.default.temporaryDirectory.appending(path: "reachly-edit-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let upload = temp.appending(path: "site.tar.gz")
+        try Data("payload".utf8).write(to: upload)
+
+        let host = FakeToolHost(hosts: [FakeToolHost.web])
+        host.approval = { _ in .edited("cat > /srv/elsewhere") }
+        let runner = AgentToolRunner(host: host, source: .agentPanel)
+
+        let calls: [(AgentToolName, JSONValue)] = [
+            (.writeFile, ["host": "web-01", "path": "/etc/motd", "contents": "hello", "reason": "banner"]),
+            (.sftpTransfer, ["host": "web-01", "direction": "upload", "remote_path": "/tmp/site.tar.gz", "local_path": .string(upload.path), "reason": "deploy"]),
+            (.sftpTransfer, ["host": "web-01", "direction": "download", "remote_path": "/etc/hosts", "local_path": .string(temp.appending(path: "hosts").path), "reason": "copy"]),
+            (.readFile, ["host": "web-01", "path": "/etc/hosts"]),
+        ]
+        for (tool, input) in calls {
+            let result = await runner.call(name: tool.rawValue, input: input)
+            #expect(result.isError, "\(tool.rawValue)")
+            #expect(result.content == "The user's edit can't be applied to \(tool.rawValue); nothing ran.")
+        }
+
+        #expect(host.approvalRequests.count == calls.count)
+        #expect(host.executed.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: temp.appending(path: "hosts").path))
+        #expect(host.auditRecords.map(\.decision) == Array(repeating: .denied, count: calls.count))
+        #expect(!host.auditRecords.contains { $0.decision == .edited || $0.decision.ran })
+        #expect(host.auditRecords.map(\.decisionDetail) == calls.map { "The user's edit can't be applied to \($0.0.rawValue); nothing ran." })
+        #expect(host.auditRecords.allSatisfy { $0.proposedCommand == nil && !$0.command.contains("/srv/elsewhere") })
+    }
+
+    @Test func runCommandEditsStillRunTheEditedText() async throws {
+        let host = FakeToolHost(hosts: [FakeToolHost.web])
+        host.approval = { _ in .edited("  df -h /srv\n") }
+        let runner = AgentToolRunner(host: host, source: .mcp)
+
+        let result = await runCommand(runner, "df -h")
+
+        #expect(!result.isError)
+        #expect(result.content.contains("ran: df -h /srv"))
+        #expect(host.executed.map(\.command) == ["df -h /srv"])
+        let record = try #require(host.auditRecords.first)
+        #expect(host.auditRecords.map(\.decision) == [.edited])
+        #expect(record.command == "df -h /srv")
+        #expect(record.proposedCommand == "df -h")
     }
 
     @Test func systemPromptExplainsComments() {
