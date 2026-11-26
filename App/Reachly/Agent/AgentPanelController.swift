@@ -26,8 +26,12 @@ final class AgentPanelController {
     private(set) var scope: Scope = .all
     private(set) var session: AgentSession?
     private(set) var conversation: AgentConversation?
-    /// Why the last send could not start (missing key, bad URL).
-    private(set) var setupError: String?
+    /// True while a send or a retry builds its provider (which can wait on
+    /// Touch ID), so a second one cannot start meanwhile.
+    private(set) var isPreparing = false
+    /// Bumped when the user sends or retries, so the transcript goes to its end
+    /// and follows the reply even if it had been scrolled up.
+    private(set) var scrollToEndRequest = 0
     /// Bumped whenever the saved conversation list changes.
     private(set) var conversationsVersion = 0
     /// Files attached to the message being written, in the order they were added.
@@ -124,7 +128,6 @@ final class AgentPanelController {
         } else {
             session = makeSession(messages: messages)
         }
-        setupError = nil
     }
 
     func newConversation() {
@@ -136,7 +139,6 @@ final class AgentPanelController {
         } else {
             session = makeSession(messages: [])
         }
-        setupError = nil
     }
 
     func delete(_ stored: AgentConversation) {
@@ -237,9 +239,9 @@ final class AgentPanelController {
     }
 
     /// Whether this message can be rewritten: a user turn the person typed
-    /// (not a tool result), while no reply is running.
+    /// (not a tool result), while no reply is running or starting.
     func canEdit(_ message: AgentMessage) -> Bool {
-        message.role == .user && (!message.text.isEmpty || !message.attachments.isEmpty) && session?.isRunning != true
+        message.role == .user && (!message.text.isEmpty || !message.attachments.isEmpty) && session?.isRunning != true && !isPreparing
     }
 
     /// Starts rewriting an earlier message: its files go back in the pending
@@ -264,7 +266,7 @@ final class AgentPanelController {
     // MARK: Sending
 
     var canSend: Bool {
-        session?.isRunning != true && !isAttaching
+        session?.isRunning != true && !isAttaching && !isPreparing
     }
 
     func send(_ text: String) {
@@ -272,40 +274,77 @@ final class AgentPanelController {
         guard !trimmed.isEmpty || !pendingAttachments.isEmpty else { return }
         let session = session ?? makeSession(messages: [])
         self.session = session
-        guard session.canSend else { return }
+        guard session.canSend, !isPreparing else { return }
         let files = pendingAttachments
         let edited = editing
         pendingAttachments = []
         attachmentError = nil
-        setupError = nil
+        isPreparing = true
+        scrollToEndRequest += 1
         Task {
+            defer { isPreparing = false }
+            var setupFailure: String?
             do {
-                // One snapshot before any await: the prompt must not be able to retarget the key or host.
-                let plan = settings.providerPlan()
-                if providerConfiguration != plan.configuration
-                    || providerKeyVersion != plan.keyVersion
-                    || session.provider is PlaceholderProvider {
-                    session.provider = try await settings.makeProvider(for: plan)
-                    providerConfiguration = plan.configuration
-                    providerKeyVersion = plan.keyVersion
-                    providerKind = plan.configuration.kind
-                }
-                session.systemPrompt = systemPrompt(providerName: plan.configuration.kind.agentName)
-                if let edited, editing?.id == edited.id {
-                    // The rewritten message takes the place of the original and of
-                    // every reply that followed it. Files taken off the edit go with it.
-                    editing = nil
-                    session.rewind(to: edited.id)
-                    let kept = Set(files.map(\.id))
-                    for file in edited.attachments where !kept.contains(file.id) { AttachmentImporter.discard(file) }
-                }
-                session.send(trimmed, attachments: files)
+                try await prepareProvider(for: session)
             } catch {
-                // Keep the files so the user can try again once the key is set.
-                pendingAttachments = files + pendingAttachments
-                setupError = error.localizedDescription
+                setupFailure = error.localizedDescription
+            }
+            if let edited, editing?.id == edited.id {
+                // The rewritten message takes the place of the original and of
+                // every reply that followed it. Files taken off the edit go with it.
+                editing = nil
+                session.rewind(to: edited.id)
+                let kept = Set(files.map(\.id))
+                for file in edited.attachments where !kept.contains(file.id) { AttachmentImporter.discard(file) }
+            }
+            if let setupFailure {
+                // The message and its files stay in the transcript with the reason
+                // under it, and Retry sends them once the key is set.
+                session.recordUnsent(trimmed, attachments: files, reason: setupFailure)
+            } else {
+                session.send(trimmed, attachments: files)
             }
         }
+    }
+
+    /// Whether this failure row is the latest and its turn can run again.
+    func canRetry(_ message: AgentMessage) -> Bool {
+        guard let session, !isPreparing, session.canRetry else { return false }
+        return session.messages.last?.id == message.id
+    }
+
+    /// Runs the turn that ended in the latest failure row again, building the
+    /// provider first if the settings changed. If it still cannot start, the
+    /// row says why instead of a new one being added.
+    func retry() {
+        guard let session, session.canRetry, !isPreparing else { return }
+        isPreparing = true
+        scrollToEndRequest += 1
+        Task {
+            defer { isPreparing = false }
+            do {
+                try await prepareProvider(for: session)
+                session.retry()
+            } catch {
+                session.recordSetupFailure(error.localizedDescription)
+            }
+        }
+    }
+
+    /// Builds the provider when the settings or the key changed since the last
+    /// turn, and points the system prompt at the current scope.
+    private func prepareProvider(for session: AgentSession) async throws {
+        // One snapshot before any await: the prompt must not be able to retarget the key or host.
+        let plan = settings.providerPlan()
+        if providerConfiguration != plan.configuration
+            || providerKeyVersion != plan.keyVersion
+            || session.provider is PlaceholderProvider {
+            session.provider = try await settings.makeProvider(for: plan)
+            providerConfiguration = plan.configuration
+            providerKeyVersion = plan.keyVersion
+            providerKind = plan.configuration.kind
+        }
+        session.systemPrompt = systemPrompt(providerName: plan.configuration.kind.agentName)
     }
 
     func stop() {

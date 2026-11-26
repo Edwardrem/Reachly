@@ -320,6 +320,80 @@ struct TranscriptRepairTests {
         #expect(ToolCallInput.decoded(raw)[ToolCallInput.rawArgumentsKey]?.stringValue == raw)
     }
 
+    // MARK: Failure rows
+
+    @Test func failureRowsAreLeftOutOfTheRequestAndKeptInTheTranscript() {
+        let original: [AgentMessage] = [
+            .user("hi"),
+            AgentMessage(failure: AgentFailure(kind: .error, message: "Overloaded"), partial: [.text("half")]),
+            .user("again"),
+            turn(.assistant, [.text("checking"), call("t1")]),
+            // Between a call and its result, a row answers nothing and takes no answer.
+            AgentMessage(failure: AgentFailure(kind: .setup, message: "No key")),
+            turn(.user, [answer("t1")]),
+            turn(.assistant, [.text("done")]),
+            AgentMessage(failure: AgentFailure(kind: .cutOff, message: "Cut off")),
+        ]
+        let sent = AgentTranscript.repaired(original)
+        #expect(sent.allSatisfy { $0.failure == nil })
+        #expect(sent.map(\.role) == [.user, .user, .assistant, .user, .assistant], "rows are not user turns, and no turn is invented for them")
+        #expect(sent.map(\.text) == ["hi", "again", "checking", "", "done"])
+        #expect(sent[3].blocks == [answer("t1")], "the real result still answers the call")
+        #expect(toolPairingIsValid(sent))
+
+        let shown = AgentTranscript.healed(original)
+        #expect(shown == original, "healthy history keeps its rows where they are")
+        #expect(AgentTranscript.healed(shown) == shown)
+        #expect(AgentTranscript.repaired(shown) == sent)
+        #expect(AgentTranscript.repaired(sent) == sent)
+    }
+
+    @Test func rowAfterAnUnansweredCallLeavesTheCallToBeAnswered() {
+        let original: [AgentMessage] = [
+            .user("hi"),
+            turn(.assistant, [call("t1")]),
+            AgentMessage(failure: AgentFailure(kind: .error, message: "Overloaded")),
+            .user("carry on"),
+        ]
+        let sent = AgentTranscript.repaired(original)
+        #expect(toolPairingIsValid(sent))
+        #expect(sent.count == 3)
+        #expect(sent[2].blocks == [lost("t1"), .text("carry on")], "the next user turn answers the call, as without the row")
+
+        let shown = AgentTranscript.healed(original)
+        #expect(shown.map(\.failure?.kind) == [nil, nil, .error, nil])
+        #expect(shown[3].blocks == [lost("t1"), .text("carry on")])
+        #expect(AgentTranscript.repaired(shown) == sent)
+    }
+
+    @Test func providersNeverSendFailureRows() {
+        let transcript: [AgentMessage] = [
+            .user("hi"),
+            AgentMessage(
+                failure: AgentFailure(kind: .error, message: "Overloaded (overloaded_error)"),
+                partial: [.thinking(text: "private reasoning", signature: "sig"), .text("half a reply")]
+            ),
+            turn(.assistant, [.text("checking"), call("t1")]),
+            turn(.user, [answer("t1")]),
+            AgentMessage(failure: AgentFailure(kind: .toolRounds, message: "Stopped after 40 rounds of tool calls. Send a message to continue.")),
+        ]
+
+        let anthropic = AnthropicProvider.messagesJSON(transcript)
+        #expect(anthropic.arrayValue?.map { $0["role"]?.stringValue } == ["user", "assistant", "user"])
+        #expect(anthropicPairingIsValid(anthropic))
+        for leaked in ["half a reply", "private reasoning", "Overloaded", "Stopped after", "failure"] {
+            #expect(!anthropic.text.contains(leaked), Comment(rawValue: leaked))
+        }
+
+        let openAI = OpenAICompatibleProvider.messagesJSON(transcript)
+        #expect(openAI.map { $0["role"]?.stringValue } == ["user", "assistant", "tool"])
+        #expect(openAIPairingIsValid(openAI))
+        let openAIText = JSONValue.array(openAI).text
+        for leaked in ["half a reply", "private reasoning", "Overloaded", "Stopped after", "failure"] {
+            #expect(!openAIText.contains(leaked), Comment(rawValue: leaked))
+        }
+    }
+
     // MARK: Providers
 
     @Test func anthropicWireFormAnswersEveryCall() {
@@ -369,7 +443,8 @@ struct TranscriptRepairTests {
         await waitUntilDone(session)
 
         #expect(toolPairingIsValid(session.messages))
-        #expect(session.messages.last?.blocks == [interruptedByLimit("t1")])
+        #expect(session.messages.dropLast().last?.blocks == [interruptedByLimit("t1")])
+        #expect(session.messages.last?.failure?.kind == .cutOff, "the transcript ends with the failure row")
         #expect(session.lastError?.contains("output limit") == true)
         #expect(host.executed.isEmpty, "a truncated call must not run")
 
@@ -393,7 +468,8 @@ struct TranscriptRepairTests {
         session.send("go")
         await waitUntilDone(session)
         #expect(toolPairingIsValid(session.messages))
-        #expect(session.messages.last?.blocks == [interrupted("t1")])
+        #expect(session.messages.dropLast().last?.blocks == [interrupted("t1")])
+        #expect(session.messages.last?.failure == AgentFailure(kind: .interrupted, message: "The reply was interrupted before a tool call finished. Send \"continue\" to go on."))
         #expect(session.lastError == "The reply was interrupted before a tool call finished. Send \"continue\" to go on.")
 
         session.send("go on")
@@ -416,7 +492,8 @@ struct TranscriptRepairTests {
         session.send("go")
         await waitUntilDone(session)
         #expect(toolPairingIsValid(session.messages))
-        #expect(session.messages.last?.blocks == [interrupted("t1")])
+        #expect(session.messages.dropLast().last?.blocks == [interrupted("t1")])
+        #expect(session.messages.last?.failure?.kind == .interrupted, "the transcript ends with the failure row")
         #expect(session.lastError == "The reply was interrupted before a tool call finished. Send \"continue\" to go on.")
         #expect(host.executed.isEmpty)
     }
@@ -513,7 +590,9 @@ struct TranscriptRepairTests {
         session.send("go")
         await waitUntilDone(session)
 
-        #expect(session.messages.count == 1, "no empty assistant turn is appended")
+        #expect(session.messages.count == 2)
+        #expect(AgentTranscript.repaired(session.messages).count == 1, "no empty assistant turn is appended")
+        #expect(session.messages.last?.blocks == [.failure(AgentFailure(kind: .unreadable, message: "The model's reply could not be read. Send the message again."))], "only the failure row follows the message")
         #expect(session.lastError == "The model's reply could not be read. Send the message again.")
         #expect(toolPairingIsValid(session.messages))
         #expect(host.executed.isEmpty)

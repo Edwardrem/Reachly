@@ -22,6 +22,12 @@ public struct AgentMessage: Codable, Sendable, Equatable, Identifiable {
         self.model = model
     }
 
+    /// A failure row: why a reply stopped, shown where it stopped, after what
+    /// had streamed of it. It is display only and never sent to a model.
+    public init(failure: AgentFailure, partial: [AgentContentBlock] = [], createdAt: Date = .now, model: String? = nil) {
+        self.init(role: .assistant, blocks: partial + [.failure(failure)], createdAt: createdAt, model: model)
+    }
+
     public static func user(_ text: String) -> AgentMessage {
         AgentMessage(role: .user, blocks: [.text(text)])
     }
@@ -45,6 +51,68 @@ public struct AgentMessage: Codable, Sendable, Equatable, Identifiable {
     public var toolUses: [(id: String, name: String, input: JSONValue)] {
         blocks.compactMap { if case .toolUse(let id, let name, let input) = $0 { return (id, name, input) } else { return nil } }
     }
+
+    /// Set on a failure row. The row's other blocks are what streamed before
+    /// the reply failed, kept for the reader.
+    public var failure: AgentFailure? {
+        for block in blocks {
+            if case .failure(let failure) = block { return failure }
+        }
+        return nil
+    }
+}
+
+/// Why a reply did not finish, kept in the transcript where it stopped and
+/// saved with the conversation. Failure rows are for the reader only: they are
+/// never sent to a model and play no part in tool-call pairing.
+public struct AgentFailure: Codable, Sendable, Equatable {
+    public enum Kind: String, Codable, Sendable {
+        /// The request could not start: no key, a bad endpoint, Touch ID cancelled.
+        case setup
+        /// The provider or the network returned an error.
+        case error
+        /// The reply held nothing that could be read.
+        case unreadable
+        /// The reply reached the model's output limit.
+        case cutOff = "cut_off"
+        /// The model declined to continue.
+        case refusal
+        /// The reply ended before a tool call finished.
+        case interrupted
+        /// The agent reached its limit of tool rounds for one message.
+        case toolRounds = "tool_rounds"
+        /// The user stopped the reply.
+        case stopped
+    }
+
+    public var kind: Kind
+    public var message: String
+
+    public init(kind: Kind, message: String) {
+        self.kind = kind
+        self.message = message
+    }
+
+    /// One sentence for the transcript and the clipboard. Provider and setup
+    /// errors are prefixed with what failed; the other messages already say it.
+    public var summary: String {
+        switch kind {
+        case .setup: "Not sent: \(message)"
+        case .error: "The request failed: \(message)"
+        case .unreadable, .cutOff, .refusal, .interrupted, .toolRounds, .stopped: message
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case kind, message
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // A kind added by a later version reads as a plain error instead of failing the whole transcript.
+        kind = Kind(rawValue: try container.decodeIfPresent(String.self, forKey: .kind) ?? "") ?? .error
+        message = try container.decodeIfPresent(String.self, forKey: .message) ?? ""
+    }
 }
 
 public enum AgentContentBlock: Codable, Sendable, Equatable {
@@ -57,9 +125,11 @@ public enum AgentContentBlock: Codable, Sendable, Equatable {
     case toolResult(toolUseID: String, content: String, isError: Bool)
     /// A file the user attached (user turns only).
     case attachment(AgentAttachment)
+    /// Marks a failure row (see `AgentFailure`). Display only: never sent.
+    case failure(AgentFailure)
 
     private enum CodingKeys: String, CodingKey {
-        case type, text, signature, data, id, name, input, toolUseID = "tool_use_id", content, isError = "is_error", file
+        case type, text, signature, data, id, name, input, toolUseID = "tool_use_id", content, isError = "is_error", file, failure
     }
 
     public init(from decoder: any Decoder) throws {
@@ -77,6 +147,8 @@ public enum AgentContentBlock: Codable, Sendable, Equatable {
             self = .toolResult(toolUseID: try container.decode(String.self, forKey: .toolUseID), content: try container.decodeIfPresent(String.self, forKey: .content) ?? "", isError: try container.decodeIfPresent(Bool.self, forKey: .isError) ?? false)
         case "attachment":
             self = .attachment(try container.decode(AgentAttachment.self, forKey: .file))
+        case "failure":
+            self = .failure(try container.decode(AgentFailure.self, forKey: .failure))
         case let other:
             throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "Unknown block type \(other)")
         }
@@ -108,6 +180,9 @@ public enum AgentContentBlock: Codable, Sendable, Equatable {
         case .attachment(let file):
             try container.encode("attachment", forKey: .type)
             try container.encode(file, forKey: .file)
+        case .failure(let failure):
+            try container.encode("failure", forKey: .type)
+            try container.encode(failure, forKey: .failure)
         }
     }
 }
@@ -124,19 +199,37 @@ public enum AgentTranscript {
     /// The result text for a call whose streamed input never parsed, so it cannot be run.
     public static let cutOffInputToolCallText = "This tool call's input was not valid JSON (it may have been cut off), so it did not run. Send it again with valid JSON, in smaller parts if it was large."
 
-    /// Returns a transcript the Messages API accepts: every assistant turn with
-    /// tool calls is answered by the very next user turn, with exactly one result
-    /// per call in call order, results before any other block, and results that
-    /// answer nothing dropped. Missing results are added as errors that warn the
-    /// call may have run; a call with an empty id (a half-streamed block) or a
+    /// Returns a transcript the Messages API accepts: failure rows are left out
+    /// (they are for the reader only), and every assistant turn with tool calls
+    /// is answered by the very next user turn, with exactly one result per call
+    /// in call order, results before any other block, and results that answer
+    /// nothing dropped. Missing results are added as errors that warn the call
+    /// may have run; a call with an empty id (a half-streamed block) or a
     /// repeated id is dropped. Healthy history is returned unchanged, so the
     /// function is idempotent.
     public static func repaired(_ messages: [AgentMessage]) -> [AgentMessage] {
+        repair(messages, keepingFailures: false)
+    }
+
+    /// The same repair for the transcript that is shown and saved: failure rows
+    /// stay where they are and the repair passes over them, so
+    /// `repaired(healed(x)) == repaired(x)`.
+    public static func healed(_ messages: [AgentMessage]) -> [AgentMessage] {
+        repair(messages, keepingFailures: true)
+    }
+
+    private static func repair(_ messages: [AgentMessage], keepingFailures: Bool) -> [AgentMessage] {
         var out: [AgentMessage] = []
         // The call ids of the immediately preceding assistant turn, still unanswered.
         var pending: [String] = []
 
         for message in messages {
+            if message.failure != nil {
+                // Neither a reply nor a user turn: it answers no call and leaves
+                // the pending ones for the next user turn.
+                if keepingFailures { out.append(message) }
+                continue
+            }
             if message.role == .assistant {
                 if !pending.isEmpty {
                     out.append(answering(pending))
@@ -211,6 +304,7 @@ public enum AgentTranscript {
 
     /// The conversation as plain text for the clipboard: each visible turn
     /// under "You" or the assistant's name, attachments by name and tool calls as one line.
+    /// A failure row is a line of its own in brackets, after any text that streamed before it.
     /// Thinking and tool results are left out. A transcript does not record who wrote each
     /// reply, so one name labels every assistant turn.
     public static func plainText(_ messages: [AgentMessage], assistantName: String = "Claude") -> String {
@@ -228,17 +322,21 @@ public enum AgentTranscript {
                     let detail = input["command"]?.stringValue ?? input["path"]?.stringValue ?? input["remote_path"]?.stringValue ?? input["file_name"]?.stringValue
                     let host = input["host"]?.stringValue.map { " on \($0)" } ?? ""
                     lines.append("[\(name)\(host)\(detail.map { ": \($0)" } ?? "")]")
-                case .thinking, .redactedThinking, .toolResult:
+                case .thinking, .redactedThinking, .toolResult, .failure:
                     break
                 }
             }
-            guard !lines.isEmpty else { continue }
-            let body = lines.joined(separator: "\n")
-            // Consecutive assistant messages (a reply split by tool calls) read as one turn.
-            if message.role == .assistant, let last = turns.last, last.hasPrefix(assistantHeading) {
-                turns[turns.count - 1] = last + "\n" + body
-            } else {
-                turns.append((message.role == .user ? "You:\n" : assistantHeading) + body)
+            if !lines.isEmpty {
+                let body = lines.joined(separator: "\n")
+                // Consecutive assistant messages (a reply split by tool calls) read as one turn.
+                if message.role == .assistant, let last = turns.last, last.hasPrefix(assistantHeading) {
+                    turns[turns.count - 1] = last + "\n" + body
+                } else {
+                    turns.append((message.role == .user ? "You:\n" : assistantHeading) + body)
+                }
+            }
+            if let failure = message.failure {
+                turns.append("[\(failure.summary)]")
             }
         }
         return turns.joined(separator: "\n\n")
