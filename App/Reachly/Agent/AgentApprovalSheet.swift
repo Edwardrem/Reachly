@@ -4,12 +4,15 @@ import ReachlyCore
 
 /// "Claude wants to run…" (or the provider answering in the panel) with the exact command, the host and the reason.
 /// Approve runs it as shown, editing runs the edited text, Deny tells the model no.
+/// A comment sends the request back instead: nothing runs, and the model gets the
+/// comment (and any edit) so it can propose a revised command in a new sheet.
 struct AgentApprovalSheet: View {
     let prompt: AgentApprovalPrompt
     /// Who is answering in the panel. A request from an MCP client comes from Claude Desktop or Claude Code.
     let assistantName: String
     @Environment(\.palette) private var palette
     @State private var command: String
+    @State private var comment = ""
 
     init(prompt: AgentApprovalPrompt, assistantName: String) {
         self.prompt = prompt
@@ -21,6 +24,14 @@ struct AgentApprovalSheet: View {
     private var requesterName: String { request.source == .mcp ? "Claude" : assistantName }
     private var isEdited: Bool { command != request.command }
     private var isEmpty: Bool { command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    /// What Send answers; nil while the comment is empty or only whitespace.
+    private var changeRequest: AgentApprovalResponse? {
+        AgentApprovalResponse.changeRequest(comment: comment, command: command, proposed: request.command)
+    }
+    /// A comment is waiting to be sent, so Approve and Run Edited Command stay off:
+    /// running the command would drop it.
+    private var hasComment: Bool { changeRequest != nil }
+    private var commentLimit: Int { AgentApprovalResponse.commentLimit }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -61,16 +72,48 @@ struct AgentApprovalSheet: View {
                     .font(.caption)
                     .foregroundStyle(request.isDestructive ? .red : .secondary)
             }
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Comment").foregroundStyle(.secondary)
+                TextField("Comment", text: $comment, prompt: Text("Ask for changes…"), axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .lineLimit(2...5)
+                    .padding(8)
+                    .background(palette.raised, in: Design.shape(Design.radiusMedium))
+                    .overlay(Design.shape(Design.radiusMedium).strokeBorder(palette.separator))
+                    .onChange(of: comment) { _, text in
+                        if text.count > commentLimit { comment = String(text.prefix(commentLimit)) }
+                    }
+                    .onSubmit { if let changeRequest { prompt.resume(changeRequest) } }
+                    .onExitCommand { prompt.resume(.denied) }
+                if hasComment || comment.count > commentLimit - 200 {
+                    HStack(alignment: .firstTextBaseline) {
+                        if hasComment {
+                            Text("Nothing runs. \(requesterName) gets your comment\(isEdited ? " and your edit" : "") and can propose a revised command. Clear the comment to \(isEdited ? "run your edit" : "approve") instead.")
+                        }
+                        Spacer(minLength: 8)
+                        if comment.count > commentLimit - 200 {
+                            Text("\(comment.count) / \(commentLimit.formatted())").monospacedDigit()
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
             HStack {
                 Button("Deny") { prompt.resume(.denied) }
                     .keyboardShortcut(.cancelAction)
                 Spacer()
                 if isEdited {
                     Button("Run Edited Command") { prompt.resume(.edited(command)) }
-                        .keyboardShortcut(.defaultAction)
-                        .disabled(isEmpty)
+                        .keyboardShortcut(hasComment ? nil : .defaultAction)
+                        .disabled(isEmpty || hasComment)
                 } else {
                     Button("Approve") { prompt.resume(.approved) }
+                        .keyboardShortcut(hasComment ? nil : .defaultAction)
+                        .disabled(hasComment)
+                }
+                if let changeRequest {
+                    Button("Send to \(requesterName)") { prompt.resume(changeRequest) }
                         .keyboardShortcut(.defaultAction)
                 }
             }

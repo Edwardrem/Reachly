@@ -8,6 +8,9 @@ public enum AgentActionSource: String, Codable, Sendable, CaseIterable {
 }
 
 /// What the guardrails decided about an agent action.
+///
+/// Stored by raw value (`AgentAuditEntry.decisionRaw`) and exported as JSON:
+/// add cases, never rename or remove one.
 public enum AgentAuditDecision: String, Codable, Sendable, CaseIterable {
     /// Allowed by the host's mode without asking (read-only list or allowlist match).
     case autoAllowed = "auto-allowed"
@@ -18,6 +21,9 @@ public enum AgentAuditDecision: String, Codable, Sendable, CaseIterable {
     /// Refused by read-only mode or another rule; the user was not asked.
     case blocked
     case cancelled
+    /// The user sent a comment back from the approval sheet instead of running
+    /// the command. The comment is in the entry's decision detail.
+    case changesRequested = "changes-requested"
 
     public var displayName: String {
         switch self {
@@ -27,14 +33,42 @@ public enum AgentAuditDecision: String, Codable, Sendable, CaseIterable {
         case .denied: "Denied"
         case .blocked: "Blocked"
         case .cancelled: "Cancelled"
+        case .changesRequested: "Changes requested"
         }
     }
 
     public var ran: Bool {
         switch self {
         case .autoAllowed, .approved, .edited: true
-        case .denied, .blocked, .cancelled: false
+        case .denied, .blocked, .cancelled, .changesRequested: false
         }
+    }
+
+    private static let commentMarker = "Comment: "
+
+    /// The decision detail for `.changesRequested`: the guardrail reason, the
+    /// suggested command when there is one, and the comment last, since it can
+    /// span lines.
+    public static func changesRequestedDetail(guardrail: String, comment: String, suggestion: String?) -> String {
+        var lines: [String] = []
+        if !guardrail.isEmpty { lines.append(guardrail) }
+        if let suggestion { lines.append("Suggested command: \(suggestion)") }
+        lines.append(commentMarker + comment)
+        return lines.joined(separator: "\n")
+    }
+
+    /// The comment inside a `changesRequestedDetail`, or nil when there is none.
+    public static func changesRequestedComment(in detail: String) -> String? {
+        let start: String.Index
+        if detail.hasPrefix(commentMarker) {
+            start = detail.index(detail.startIndex, offsetBy: commentMarker.count)
+        } else if let range = detail.range(of: "\n" + commentMarker) {
+            start = range.upperBound
+        } else {
+            return nil
+        }
+        let comment = detail[start...].trimmingCharacters(in: .whitespacesAndNewlines)
+        return comment.isEmpty ? nil : comment
     }
 }
 
@@ -107,6 +141,11 @@ public final class AgentAuditEntry {
     public var decision: AgentAuditDecision {
         get { AgentAuditDecision(rawValue: decisionRaw) ?? .blocked }
         set { decisionRaw = newValue.rawValue }
+    }
+
+    /// What the user wrote when they asked for changes; nil for every other decision.
+    public var changesRequestedComment: String? {
+        decision == .changesRequested ? AgentAuditDecision.changesRequestedComment(in: decisionDetail) : nil
     }
 }
 
