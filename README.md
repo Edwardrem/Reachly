@@ -176,7 +176,11 @@ conversations. Your real hosts never leave your Mac.
   hosts into a managed block of `~/.ssh/config`. Servers already trusted in
   `~/.ssh/known_hosts` appear under *Detected on this Mac* in the sidebar; Add
   saves one as a host and trusts the same keys in Reachly, so the first
-  connection does not ask again.
+  connection usually does not ask again. It can still ask when known_hosts
+  lists several keys of one type for the server (Reachly keeps one per type
+  and does not guess), or when the server presents a key type known_hosts has
+  no entry for, such as a server the Mac knows only by its RSA key (Reachly
+  uses Ed25519 or ECDSA host keys).
 - **Backups**: the last 10 exports and pre-import snapshots are kept under
   Application Support → Reachly → Backups and listed in Settings → Data.
 - **Updates**: Sparkle 2 fed by an appcast on GitHub Pages, with a
