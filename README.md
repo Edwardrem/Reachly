@@ -25,7 +25,7 @@ encrypted `.reachly` file. The full plan is in
 - **Releases:** [`release.yml`](.github/workflows/release.yml) tests, builds, packages and publishes each
   `vX.Y.Z` tag.
   - Nothing is published unless every test passes on that commit, the live SSH tests included.
-  - From 1.1.3, each release carries `Reachly-X.Y.Z-tests.txt`: the result, the commit, the workflow run and every
+  - From 1.1.4, each release carries `Reachly-X.Y.Z-tests.txt`: the result, the commit, the workflow run and every
     test by name.
   - Each release also has the DMG, the updater ZIP and `SHA256SUMS`.
 - **Homebrew:** the cask's source is [`Casks/reachly.rb`](Casks/reachly.rb), in this repository. The release

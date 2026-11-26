@@ -24,7 +24,7 @@ The rules live in `Sources/ReachlyAgent/Guardrails/CommandGuard.swift`. They are
 
 ## How the guard reads a command
 
-The guard is pattern-based, so since 1.1.3 it reads a command line the way a shell would before it decides:
+The guard is pattern-based, so since 1.1.4 it reads a command line the way a shell would before it decides:
 
 - **Each command is checked on its own.** The line is cut at every unquoted `;`, `&&`, `||`, `|`, `&` and newline,
   and every command in it must be allowlisted or read-only. An allowlist entry `df *` covers `df -h | grep sda`
@@ -79,7 +79,7 @@ or be refused:
 - paths that climb out of a folder.
 
 It also checks that 38 ordinary commands still run, such as `df -h | grep`, `sed -n '1,50p'`, `curl -s -o /dev/null -w '%{http_code}'` and
-`systemctl restart nginx && systemctl status nginx`. The guard as it was before 1.1.3 lets 84 of the 97 attacks
+`systemctl restart nginx && systemctl status nginx`. The guard as it was in 1.1.2 lets 84 of the 97 attacks
 through.
 
 **Limits of a pattern-based guard.** No set of patterns can foresee every way a shell can be told to do
