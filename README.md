@@ -141,18 +141,33 @@ conversations. Your real hosts never leave your Mac.
   `read_terminal_buffer`, runs commands in a dedicated agent tab you can watch
   and stop with Esc, and conversations are saved per host or group.
 - **Qoder in the chat panel**: choose Qoder (ACP) and the panel runs the Qoder
-  CLI as an Agent Client Protocol agent (`qoder --acp`, or `qoder acp`), one
-  process for the panel, in a folder of its own under Application Support.
-  Qoder uses its own sign-in and models, which Reachly never reads. Reachly
+  CLI as an Agent Client Protocol agent (`qoder --acp`, or `qoder acp` only
+  when it says it doesn't know `--acp`), one process for the panel, in a
+  folder of its own under Application Support. Before each start Reachly
+  follows the chosen path's links and runs the file they lead to, never one
+  inside an app bundle (the Qoder editor's own `qoder` launcher).
+  Qoder uses its own sign-in and models, which Reachly never reads. From
+  Reachly's environment it gets only `HOME`, `USER`, `LOGNAME`, `SHELL`,
+  `TMPDIR`, `LANG`, `LC_*`, `TERM`, `QODER_*` and a fuller `PATH`: no other
+  provider's key, no other token, no `SSH_AUTH_SOCK`. Reachly
   advertises no file system or terminal access and hands Qoder its own MCP
   bridge, so every command on a server goes through the guardrails, the
   approval sheet ("Qoder wants to run…") and the audit log, filed under the
   conversation. Qoder's replies, reasoning, tool calls with their status and
-  its plan stream into the transcript; when Qoder asks to use one of its own
-  tools on this Mac, Reachly shows its options in a sheet, and closing it
-  rejects. Stop sends `session/cancel`; a crash leaves a failure row with
-  Retry. Each conversation keeps its Qoder session, and a restarted Qoder
-  loads it back when it offers `session/load`.
+  its plan stream into the transcript. Qoder's own tools run on this Mac under
+  Qoder's own settings, with your user's access, and Qoder decides when to
+  ask: Reachly starts it with `--permission-mode default` (the mode Qoder's
+  docs say asks before sensitive actions), and when Qoder asks, Reachly shows
+  its options in a sheet, each saying whether it allows or rejects, and
+  closing it rejects. The working folder is not a sandbox. Quitting Reachly
+  stops Qoder and the bridges it started, and a Qoder that floods updates is
+  made to wait instead of filling Reachly's memory. Stop sends `session/cancel`; a crash leaves a failure row with
+  Retry. However a reply ends (answered, stopped, failed, Qoder gone), the
+  sheets it was waiting on go, and a command it asks for after that gets no
+  sheet. Each conversation keeps its Qoder session, and a restarted Qoder
+  loads it back when it offers `session/load`, but only if that session saw
+  every message so far: after an edit, or a turn another provider answered,
+  Qoder starts a new session and the transcript says so.
 - **Guardrails**: each host is read-only (a safe list such as `ls`, `cat`,
   `systemctl status`), ask (every command in an approval sheet) or allowlist
   (your patterns run, everything else asks). Destructive patterns (`rm -rf`,
@@ -165,7 +180,9 @@ conversations. Your real hosts never leave your Mac.
   HTTP on localhost with a bearer token, plus a stdio bridge inside the app
   bundle) so Claude Desktop, Claude Code or any MCP client drive your servers
   with their own subscription. Settings → AI Integration shows the one-line config for
-  each client. The guardrails and audit log apply identically.
+  each client. The guardrails and audit log apply identically. A client that
+  cancels a call (`notifications/cancelled`) or drops its connection takes the
+  call's approval sheet down, and the bridge never sends a `tools/call` twice.
 - **AI providers found on this Mac**: Settings → AI Integration lists what is
   already installed, each with one button behind a confirmation that says
   exactly what will happen. To show what is already connected, detection

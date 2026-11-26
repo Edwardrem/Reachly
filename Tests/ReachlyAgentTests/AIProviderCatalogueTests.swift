@@ -251,7 +251,7 @@ struct AIProviderCatalogueTests {
         #expect(inUse.status == .inUse)
         #expect(inUse.actions.isEmpty)
         #expect(inUse.detail == "Answers in Reachly's chat panel over ACP.")
-        #expect(inUse.note?.contains("Qoder's own tools run on this Mac under Qoder's rules, and Reachly's tools run on servers under Reachly's.") == true)
+        #expect(inUse.note?.contains("Qoder's own tools run on this Mac under Qoder's own settings, with your user's access, and Reachly shows a request when Qoder asks first") == true)
 
         let serverOff = try row(.qoder, machine, reachly(.qoder, mcp: false, acp: "/usr/local/bin/qoder"))
         #expect(serverOff.status == .needsAction)
@@ -267,13 +267,22 @@ struct AIProviderCatalogueTests {
         var machine = thisMac
         machine.qoder = .init(appInstalled: true, cliPath: "/Users/me/.local/bin/qoder", config: .notConnected)
         let shown = try #require(AIProviderCatalogue.prompt(for: .useQoderInChat, machine: machine, reachly: reachly(mcp: false), home: home))
-        #expect(shown.detail == "~/.local/bin/qoder --acp")
-        #expect(shown.command == MCPConnectCommand(executable: "/Users/me/.local/bin/qoder", arguments: ["--acp"]))
+        #expect(shown.detail == "~/.local/bin/qoder --acp --permission-mode default")
+        #expect(shown.command == MCPConnectCommand(executable: "/Users/me/.local/bin/qoder", arguments: ["--acp", "--permission-mode", "default"]))
+        #expect(shown.message.contains("not a sandbox"))
+        #expect(shown.message.contains("with your user's access"))
+        #expect(!shown.message.contains("asks you before each"), "Reachly can't promise to ask before each of Qoder's own tools")
         #expect(shown.confirmTitle == "Use Qoder")
         #expect(shown.message.contains("never reads"))
         #expect(shown.message.contains("guardrails, approval sheet and audit log"))
         #expect(shown.message.contains("not your home folder"))
         #expect(shown.message.contains("turned on too"))
+        #expect(!shown.message.contains("leads to"), "a plain file says nothing about links")
+
+        machine.qoder?.cliTarget = "/Users/me/.qoder/versions/1.2.0/qodercli"
+        let linked = try #require(AIProviderCatalogue.prompt(for: .useQoderInChat, machine: machine, reachly: reachly(), home: home))
+        #expect(linked.message.contains("/Users/me/.local/bin/qoder leads to /Users/me/.qoder/versions/1.2.0/qodercli, which is the file that runs"))
+        #expect(linked.message.contains("never runs one inside an app bundle"))
         let gone = try #require(AIProviderCatalogue.prompt(for: .useQoderInChat, machine: thisMac, reachly: reachly(), home: home))
         #expect(gone.confirmTitle == nil, "the app alone can't chat")
     }

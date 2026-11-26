@@ -32,12 +32,17 @@ public struct ExternalAgentTurn: Sendable {
     public var context: String
     /// The conversation had turns before this one, so a new agent session would not know them.
     public var hasEarlierTurns: Bool
+    /// The user message before this one in the transcript. An agent session that was last sent another message
+    /// missed some of the conversation (another provider answered in between, or an earlier message was
+    /// edited), so it is not used again.
+    public var previousUserMessageID: UUID?
 
-    public init(conversationKey: String, message: AgentMessage, context: String, hasEarlierTurns: Bool) {
+    public init(conversationKey: String, message: AgentMessage, context: String, hasEarlierTurns: Bool, previousUserMessageID: UUID? = nil) {
         self.conversationKey = conversationKey
         self.message = message
         self.context = context
         self.hasEarlierTurns = hasEarlierTurns
+        self.previousUserMessageID = previousUserMessageID
     }
 }
 

@@ -64,12 +64,15 @@ public struct AIProviderMachineFacts: Sendable, Equatable {
         public var appInstalled: Bool
         /// The Qoder CLI, which can add MCP servers itself. Nil when only the app is installed.
         public var cliPath: String?
+        /// The file `cliPath` leads to through its symbolic links, when that is somewhere else.
+        public var cliTarget: String?
         /// `~/.qoder/settings.json`, which both the app and the CLI read.
         public var config: MCPClientConfig.State
 
-        public init(appInstalled: Bool, cliPath: String?, config: MCPClientConfig.State) {
+        public init(appInstalled: Bool, cliPath: String?, cliTarget: String? = nil, config: MCPClientConfig.State) {
             self.appInstalled = appInstalled
             self.cliPath = cliPath
+            self.cliTarget = cliTarget
             self.config = config
         }
     }
@@ -261,7 +264,11 @@ public enum AIProviderLocations {
         }
     }
 
+    /// Whether a folder on the way to `path` is an app bundle (`Qoder.app`, `qoder.APP`), by whole path
+    /// components, so `/opt/my.apps/bin/qoder` is not one.
     public static func isInsideAppBundle(_ path: String) -> Bool {
-        path.contains(".app/Contents/")
+        path.split(separator: "/").dropLast().contains { component in
+            component.count > 4 && component.lowercased().hasSuffix(".app")
+        }
     }
 }

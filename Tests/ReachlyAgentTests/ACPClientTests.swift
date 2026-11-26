@@ -243,6 +243,27 @@ struct ACPProtocolTests {
         #expect(ACPAgent.errorSummary("  \n") == nil)
         #expect((ACPAgent.errorSummary(String(repeating: "word ", count: 400)) ?? "").count <= 400)
     }
+
+    @Test func commonSecretShapesAreMasked() {
+        let mask = ACPAgent.maskingSecrets
+        // AWS: after its name, after a word, and on its own (base64 with slashes).
+        #expect(mask("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY") == "AWS_SECRET_ACCESS_KEY=…")
+        #expect(mask("using secret wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY now") == "using secret … now")
+        #expect(mask("signing with wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY") == "signing with …")
+        // A short password after its name.
+        #expect(mask("login failed: password=hunter2hunter2") == "login failed: password=…")
+        #expect(mask("passwd: hunter2") == "passwd: …")
+        // A bearer token in a header, and a JSON field.
+        #expect(mask("request had Authorization: Bearer abcdef0123456789xyz") == "request had Authorization: Bearer …")
+        #expect(mask(#"{"api_key": "sk-live-1234567890"}"#) == #"{"api_key": "…"}"#)
+        // URL-encoded, after its name and on its own.
+        #expect(mask("GET /callback?access_token=ya29%2Ea0AfH6SMBx%3D%3D&state=7") == "GET /callback?access_token=…&state=7")
+        #expect(mask("cookie c2VjcmV0LXRva2Vu%2Bc2VjcmV0%2Fc2VjcmV0%3D%3D") == "cookie …")
+        // Ordinary words stay.
+        #expect(mask("token expired, key not found, keychain locked") == "token expired, key not found, keychain locked")
+        #expect(mask("monkey=banana") == "monkey=banana")
+        #expect(mask("panic: index out of range") == "panic: index out of range")
+    }
 }
 
 // MARK: - JSON-RPC connection
@@ -397,7 +418,7 @@ final class FakeACPRun {
     let agent: ACPAgent
     var events: [ExternalAgentEvent] = []
 
-    init(_ scenario: String, cancelGrace: Duration = .seconds(5), initializeTimeout: Duration = .seconds(10), store: Bool = false, directory: URL? = nil) {
+    init(_ scenario: String, cancelGrace: Duration = .seconds(5), initializeTimeout: Duration = .seconds(10), store: Bool = false, directory: URL? = nil, environment: [String: String] = [:], argumentSets: [[String]] = [["--acp"], ["acp"]], fallbackNotices: [String: String] = [:]) {
         let directory = directory ?? FileManager.default.temporaryDirectory.appending(path: "reachly-acp-\(UUID().uuidString)", directoryHint: .isDirectory)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         self.directory = directory
@@ -405,8 +426,9 @@ final class FakeACPRun {
         let configuration = ACPAgent.Configuration(
             name: "Qoder",
             executable: FakeACPAgentTool.path,
-            argumentSets: [["--acp"], ["acp"]],
-            environment: ["FAKE_ACP_SCENARIO": scenario, "FAKE_ACP_LOG": logURL.path],
+            argumentSets: argumentSets,
+            fallbackNotices: fallbackNotices,
+            environment: environment.merging(["FAKE_ACP_SCENARIO": scenario, "FAKE_ACP_LOG": logURL.path]) { _, fixed in fixed },
             workingDirectory: directory.appending(path: "Workspace", directoryHint: .isDirectory),
             mcpServers: { key in
                 [ACPProtocol.StdioMCPServer(name: "reachly", command: "/Applications/Reachly.app/Contents/MacOS/reachly-mcp", environment: [("REACHLY_MCP_CLIENT", "qoder"), ("REACHLY_MCP_CONVERSATION", key)])]
@@ -420,8 +442,13 @@ final class FakeACPRun {
         agent = ACPAgent(configuration: configuration)
     }
 
+    /// The last message each conversation sent, so a turn with `earlier` follows it as in a real transcript.
+    private var lastSent: [String: UUID] = [:]
+
     func turn(_ text: String = "is web-01 low on disk?", key: String = "conversation-1", earlier: Bool = false) -> ExternalAgentTurn {
-        ExternalAgentTurn(conversationKey: key, message: .user(text), context: "Reachly context", hasEarlierTurns: earlier)
+        let message = AgentMessage.user(text)
+        defer { lastSent[key] = message.id }
+        return ExternalAgentTurn(conversationKey: key, message: message, context: "Reachly context", hasEarlierTurns: earlier, previousUserMessageID: earlier ? lastSent[key] : nil)
     }
 
     func run(_ turn: ExternalAgentTurn? = nil) async throws -> ExternalAgentStopReason {
@@ -430,11 +457,16 @@ final class FakeACPRun {
 
     /// Every line the fake agent read, as JSON, and the argument lines.
     var received: [JSONValue] {
-        lines.filter { !$0.hasPrefix("ARGV") }.compactMap { try? JSONValue.parse(Data($0.utf8)) }
+        lines.filter { !$0.hasPrefix("ARGV") && !$0.hasPrefix("HTTP ") }.compactMap { try? JSONValue.parse(Data($0.utf8)) }
     }
 
     var launches: [String] {
         lines.filter { $0.hasPrefix("ARGV") }
+    }
+
+    /// The answers the fake agent got from the test's MCP server.
+    var httpAnswers: [String] {
+        lines.filter { $0.hasPrefix("HTTP ") }.map { String($0.dropFirst(5)) }
     }
 
     private var lines: [String] {
@@ -632,16 +664,142 @@ struct ACPAgentProcessTests {
         #expect(run.texts.last == "Done.")
     }
 
-    @Test func anAgentThatNeverInitializesIsASetupFailure() async throws {
+    /// What the chat panel runs Qoder with.
+    static let panelArguments = [["--acp", "--permission-mode", "default"], ["--acp"], ["acp", "--permission-mode", "default"], ["acp"]]
+    static let panelNotices = ["--permission-mode": "Qoder didn't accept --permission-mode default, so it runs in the permission mode its own settings choose."]
+
+    @Test func qoderStartsInItsDefaultPermissionMode() async throws {
+        let run = FakeACPRun("basic", argumentSets: Self.panelArguments, fallbackNotices: Self.panelNotices)
+        defer { run.finish() }
+        _ = try await run.run()
+        #expect(run.launches == ["ARGV --acp --permission-mode default"])
+        #expect(!run.events.contains { if case .notice = $0 { true } else { false } })
+    }
+
+    @Test func aQoderThatRefusesThePermissionModeRunsWithoutItAndSaysSo() async throws {
+        let run = FakeACPRun("no-permission-mode", argumentSets: Self.panelArguments, fallbackNotices: Self.panelNotices)
+        defer { run.finish() }
+        _ = try await run.run()
+        #expect(run.launches == ["ARGV --acp --permission-mode default", "ARGV --acp"])
+        #expect(run.events.contains(.notice(Self.panelNotices["--permission-mode"]!)))
+        run.events = []
+        _ = try await run.run(run.turn("again", earlier: true))
+        #expect(!run.events.contains { if case .notice = $0 { true } else { false } }, "said once per start")
+
+        let subcommand = FakeACPRun("needs-subcommand", argumentSets: Self.panelArguments, fallbackNotices: Self.panelNotices)
+        defer { subcommand.finish() }
+        _ = try await subcommand.run()
+        #expect(subcommand.launches == ["ARGV --acp --permission-mode default", "ARGV acp --permission-mode default"], "the mode is kept when only --acp was refused")
+        #expect(!subcommand.events.contains { if case .notice = $0 { true } else { false } })
+    }
+
+    @Test func theAgentGetsOnlyTheEnvironmentItNeeds() async throws {
+        let inherited = [
+            "HOME": "/Users/me", "USER": "me", "LOGNAME": "me", "SHELL": "/bin/zsh", "TMPDIR": "/var/folders/xy/T/",
+            "LANG": "en_GB.UTF-8", "LC_ALL": "en_GB.UTF-8", "PATH": "/usr/bin:/bin",
+            "QODER_PERSONAL_ACCESS_TOKEN": "qoder-sign-in",
+            "ANTHROPIC_API_KEY": "sk-ant-secret", "OPENAI_API_KEY": "sk-secret", "SSH_AUTH_SOCK": "/private/tmp/ssh-agent.sock",
+            "FOO_TOKEN": "t", "AWS_SECRET_ACCESS_KEY": "k", "GITHUB_TOKEN": "g", "DYLD_INSERT_LIBRARIES": "/tmp/x.dylib",
+        ]
+        let environment = ACPLaunch.environment(inherited: inherited, executables: ["/Users/me/.local/bin/qoder", "/Users/me/.qoder/versions/1/qodercli"], home: "/Users/me")
+        #expect(environment["PATH"]?.hasPrefix("/Users/me/.local/bin:/Users/me/.qoder/versions/1:") == true, "the agent's own folders first")
+        #expect(environment["NO_COLOR"] == "1")
+        #expect(environment["QODER_PERSONAL_ACCESS_TOKEN"] == "qoder-sign-in", "Qoder's own sign-in reaches it")
+
+        // What the agent process actually sees.
+        let run = FakeACPRun("env", environment: environment)
+        defer { run.finish() }
+        _ = try await run.run()
+        let names = Set((run.texts.first ?? "").split(separator: ",").map(String.init))
+        for name in ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "SSH_AUTH_SOCK", "FOO_TOKEN", "AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "DYLD_INSERT_LIBRARIES"] {
+            #expect(!names.contains(name), "\(name) must not reach the agent")
+        }
+        #expect(names.isSuperset(of: ["HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "PATH", "NO_COLOR", "QODER_PERSONAL_ACCESS_TOKEN"]))
+        let unexpected = names.filter { !$0.hasPrefix("FAKE_ACP_") && !$0.hasPrefix("__CF") && !ACPLaunch.environmentNames.contains($0) && !ACPLaunch.environmentPrefixes.contains(where: $0.hasPrefix) && !["PATH", "NO_COLOR"].contains($0) }
+        #expect(unexpected.isEmpty, "nothing else: \(unexpected)")
+    }
+
+    @Test func anAgentThatNeverInitializesIsASetupFailureAndIsNotTriedAgain() async throws {
         let run = FakeACPRun("silent-init", initializeTimeout: .seconds(1))
         defer { run.finish() }
         await #expect {
             _ = try await run.run()
         } throws: { error in
             guard let failure = error as? ExternalAgentFailure else { return false }
-            return failure.kind == .setup && failure.message.contains("didn't start in ACP mode")
+            return failure.kind == .setup && failure.message.contains("didn't start in ACP mode") && failure.message.contains("within 1 seconds")
         }
-        #expect(run.launches.count == 2, "both forms were tried")
+        #expect(run.launches == ["ARGV --acp"], "a timeout is not a refused argument")
+    }
+
+    @Test func aCrashOrASignInErrorAtStartIsNotTriedAgain() async throws {
+        let crash = FakeACPRun("init-crash")
+        defer { crash.finish() }
+        await #expect {
+            _ = try await crash.run()
+        } throws: { error in
+            guard let failure = error as? ExternalAgentFailure else { return false }
+            return failure.kind == .setup && failure.message.contains("exit status 1") && failure.message.contains("the config file is broken")
+        }
+        #expect(crash.launches == ["ARGV --acp"])
+
+        let auth = FakeACPRun("init-auth")
+        defer { auth.finish() }
+        await #expect {
+            _ = try await auth.run()
+        } throws: { error in
+            (error as? ExternalAgentFailure)?.message == "Qoder isn't signed in (Authentication required). Run `qoder login` in Terminal, then Retry."
+        }
+        #expect(auth.launches == ["ARGV --acp"])
+    }
+
+    @Test func aRefusedArgumentIsReadFromWhatTheAgentSaid() {
+        let sets = ["--acp", "--permission-mode", "default"]
+        #expect(ACPLaunch.refusedArgument(in: "error: unknown option '--acp'\n", among: ["--acp"]) == "--acp")
+        #expect(ACPLaunch.refusedArgument(in: "error: unexpected argument '--acp' found\n\nUsage: qoder [OPTIONS]", among: ["--acp"]) == "--acp")
+        #expect(ACPLaunch.refusedArgument(in: "Error: unknown flag: --permission-mode", among: sets) == "--permission-mode")
+        #expect(ACPLaunch.refusedArgument(in: "error: unknown command 'acp'", among: ["acp"]) == "acp")
+        #expect(ACPLaunch.refusedArgument(in: "Unknown arguments: acp, foo", among: ["acp"]) == "acp")
+        #expect(ACPLaunch.refusedArgument(in: "panic: index out of range", among: ["--acp"]) == nil, "a crash is not a refusal")
+        #expect(ACPLaunch.refusedArgument(in: "Authentication required", among: ["--acp"]) == nil)
+        #expect(ACPLaunch.refusedArgument(in: "error: unknown option '--verbose'", among: ["--acp"]) == nil, "it must name one of ours")
+        #expect(ACPLaunch.refusedArgument(in: "warning: --acp is unrecognised here", among: ["acp", "--acp"]) == "--acp", "the longest match wins")
+    }
+
+    @Test func anAppBundleIsNeverRunEvenThroughALink() throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "reachly-launch-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let launcher = directory.appending(path: "Qoder.app/Contents/Resources/app/bin/qoder")
+        try FileManager.default.createDirectory(at: launcher.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: launcher.path, contents: Data("#!/bin/sh\n".utf8), attributes: [.posixPermissions: 0o755])
+        let cli = directory.appending(path: "cli/qoder")
+        try FileManager.default.createDirectory(at: cli.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: cli.path, contents: Data("#!/bin/sh\n".utf8), attributes: [.posixPermissions: 0o755])
+        let link = directory.appending(path: "bin/qoder")
+        try FileManager.default.createDirectory(at: link.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: cli.path)
+
+        let resolvedCLI = cli.resolvingSymlinksInPath().standardizedFileURL.path
+        #expect(ACPLaunch.resolveExecutable(link.path) == .success(resolvedCLI), "the file that runs is the link's target")
+        // The link is pointed into the editor's bundle later: the next start refuses it.
+        try FileManager.default.removeItem(at: link)
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: launcher.path)
+        guard case .failure(.insideAppBundle(let resolved)) = ACPLaunch.resolveExecutable(link.path) else {
+            Issue.record("a link into Qoder.app must be refused")
+            return
+        }
+        #expect(resolved.hasSuffix("Qoder.app/Contents/Resources/app/bin/qoder"))
+        #expect(ACPLaunch.resolveExecutable(launcher.path) == .failure(.insideAppBundle(resolved: launcher.resolvingSymlinksInPath().standardizedFileURL.path)), "typed in directly too")
+        #expect(ACPLaunch.resolveExecutable(directory.appending(path: "nothing").path) == .failure(.missing))
+        #expect(ACPLaunch.resolveExecutable(directory.path) == .failure(.notExecutable))
+    }
+
+    @Test func appBundlesAreFoundByWholePathComponentsInAnyCase() {
+        #expect(AIProviderLocations.isInsideAppBundle("/Applications/Qoder.app/Contents/Resources/app/bin/qoder"))
+        #expect(AIProviderLocations.isInsideAppBundle("/Applications/QODER.APP/Contents/MacOS/qoder"))
+        #expect(AIProviderLocations.isInsideAppBundle("/Users/me/Applications/Qoder.app/bin/qoder"), "with or without Contents")
+        #expect(!AIProviderLocations.isInsideAppBundle("/opt/my.apps/bin/qoder"))
+        #expect(!AIProviderLocations.isInsideAppBundle("/Users/me/.local/bin/qoder"))
+        #expect(!AIProviderLocations.isInsideAppBundle("/usr/local/bin/qoder.app"), "only folders on the way count")
     }
 
     @Test func stopWhileTheAgentStartsEndsAtOnce() async throws {
@@ -730,6 +888,94 @@ struct ACPAgentProcessTests {
         #expect(stop == .cancelled)
         let answer = run.received.first { $0["id"]?.stringValue == "perm-1" }
         #expect(answer?["result"]?["outcome"]?["outcome"]?.stringValue == "cancelled", "a stopped turn never allows")
+    }
+
+    @Test func everyEndOfATurnIsReportedAndStopReportsItAtOnce() async throws {
+        let answered = FakeACPRun("basic")
+        defer { answered.finish() }
+        var ended: [String] = []
+        answered.agent.turnEndHandler = { ended.append($0) }
+        _ = try await answered.run(answered.turn(key: "A"))
+        #expect(ended == ["A"])
+
+        let crashed = FakeACPRun("crash")
+        defer { crashed.finish() }
+        var crashEnds: [String] = []
+        crashed.agent.turnEndHandler = { crashEnds.append($0) }
+        _ = try? await crashed.run(crashed.turn(key: "B"))
+        #expect(crashEnds == ["B"])
+
+        // An agent that ignores Stop still has its turn reported as over when Stop is pressed.
+        let stopped = FakeACPRun("ignore-cancel", cancelGrace: .seconds(10))
+        defer { stopped.finish() }
+        var stopEnds: [String] = []
+        stopped.agent.turnEndHandler = { stopEnds.append($0) }
+        let task = Task { try await stopped.run(stopped.turn(key: "C")) }
+        await waitFor { stopped.texts.count >= 2 }
+        #expect(stopped.agent.isAnswering("C"))
+        #expect(!stopped.agent.isAnswering("D"))
+        task.cancel()
+        await waitFor { !stopEnds.isEmpty }
+        #expect(stopEnds == ["C"])
+        #expect(stopped.agent.isBusy, "the agent has not answered yet")
+        #expect(!stopped.agent.isAnswering("C"), "but nothing it asks for now can be answered")
+        stopped.agent.shutdown()
+        _ = try? await task.value
+    }
+
+    @Test func aPermissionSheetGoesWhenTheAgentAnswersWithoutWaitingOrDies() async throws {
+        for scenario in ["permission-answered", "permission-crash"] {
+            let run = FakeACPRun(scenario)
+            defer { run.finish() }
+            var asked = false
+            var sawCancel = false
+            run.agent.permissionHandler = { _ in
+                asked = true
+                // The sheet stays up until the user answers it, or its task is cancelled.
+                do { try await Task.sleep(for: .seconds(30)) } catch { sawCancel = true }
+                return .cancelled
+            }
+            let started = ContinuousClock.now
+            _ = try? await run.run()
+            await waitFor { sawCancel }
+            #expect(asked, "\(scenario)")
+            #expect(sawCancel, "\(scenario): the sheet is taken down when the turn ends")
+            #expect(ContinuousClock.now - started < .seconds(10))
+        }
+    }
+
+    @Test func aFloodingAgentWaitsForTheReaderToCatchUp() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "reachly-acp-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let process = try ACPProcess(executable: FakeACPAgentTool.path, arguments: [], environment: ["FAKE_ACP_SCENARIO": "flood"], currentDirectory: directory, backlogLimit: .init(messages: 50, bytes: 1 << 20))
+        var messages = 0
+        for await event in process.events {
+            guard case .message(let line) = event else { continue }
+            messages += 1
+            // A reader slower than the agent.
+            if messages % 250 == 0 { try? await Task.sleep(for: .milliseconds(20)) }
+            process.didHandle(byteCount: line.count)
+        }
+        #expect(messages == 5000, "nothing is dropped")
+        #expect(process.backlogHighWater <= 50, "the agent waited instead of piling up \(process.backlogHighWater) messages")
+    }
+
+    @Test func aReaderThatGoesAwayDoesNotHoldTheAgentUp() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "reachly-acp-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let process = try ACPProcess(executable: FakeACPAgentTool.path, arguments: [], environment: ["FAKE_ACP_SCENARIO": "flood"], currentDirectory: directory, backlogLimit: .init(messages: 5, bytes: 1 << 20))
+        let pid = process.pid
+        var connection: ACPConnection? = ACPConnection(transport: process)
+        var seen = 0
+        connection?.onNotification = { _, _ in seen += 1 }
+        await waitFor { seen >= 5 }
+        // Let go of mid-flood: the agent, blocked writing to a full backlog, is stopped rather than left waiting.
+        connection = nil
+        await waitFor { kill(pid, 0) != 0 }
+        #expect(kill(pid, 0) != 0, "the agent is gone and was reaped")
+        #expect(connection == nil)
     }
 
     @Test func aSecondTurnWhileOneRunsIsRefused() async throws {

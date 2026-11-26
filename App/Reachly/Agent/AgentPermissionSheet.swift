@@ -20,7 +20,7 @@ struct AgentPermissionSheet: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(request.agentName) wants to use one of its own tools")
                         .font(.headline)
-                    Text("\(request.agentName)'s own tools run on this Mac under \(request.agentName)'s rules, and Reachly's tools run on servers under Reachly's.")
+                    Text("\(request.agentName)'s own tools run on this Mac under \(request.agentName)'s own settings, with your user's access, and \(request.agentName) decides when to ask. Commands on your servers through Reachly always go through Reachly's guardrails.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -69,9 +69,19 @@ struct AgentPermissionSheet: View {
                 Button(rejectOption == nil ? "Close" : "Close and Reject") { prompt.resume(.dismissed) }
                     .keyboardShortcut(.cancelAction)
                 Spacer()
+                // Each button says what it does from the option's kind, not only the name the agent gave it, so
+                // an option that allows can't pass for one that rejects.
                 ForEach(request.options) { option in
-                    Button(option.name) { prompt.resume(.selected(option.id)) }
-                        .help(AgentToolActivityText.option(option.kind))
+                    VStack(spacing: 2) {
+                        Button { prompt.resume(.selected(option.id)) } label: {
+                            Label(option.name, systemImage: AgentToolActivityText.optionSymbol(option.kind))
+                        }
+                        Text(AgentToolActivityText.optionCaption(option.kind))
+                            .font(.caption2.weight(option.kind?.allows == true ? .semibold : .regular))
+                            .foregroundStyle(option.kind?.allows == true ? Color.orange : Color.secondary)
+                    }
+                    .help(AgentToolActivityText.option(option.kind))
+                    .accessibilityElement(children: .combine)
                 }
             }
         }
@@ -131,6 +141,25 @@ enum AgentToolActivityText {
         case .rejectOnce: "Reject this once"
         case .rejectAlways: "Reject this from now on, as the agent keeps it"
         case nil: "An option this version of Reachly doesn't know"
+        }
+    }
+
+    /// Under each permission button: what choosing it does.
+    static func optionCaption(_ kind: AgentPermissionRequest.Option.Kind?) -> String {
+        switch kind {
+        case .allowOnce: "Allows, once"
+        case .allowAlways: "Allows, from now on"
+        case .rejectOnce: "Rejects, once"
+        case .rejectAlways: "Rejects, from now on"
+        case nil: "Unknown kind"
+        }
+    }
+
+    static func optionSymbol(_ kind: AgentPermissionRequest.Option.Kind?) -> String {
+        switch kind {
+        case .allowOnce, .allowAlways: "checkmark.circle"
+        case .rejectOnce, .rejectAlways: "xmark.circle"
+        case nil: "questionmark.circle"
         }
     }
 

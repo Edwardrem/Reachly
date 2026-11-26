@@ -147,6 +147,95 @@ struct AgentSessionExternalAgentTests {
         #expect(other.messages[1].blocks == [.notice("Qoder finished without a reply.")])
     }
 
+    private static let newSessionNotice = AgentContentBlock.notice("Qoder started a new session, so it doesn't know the earlier messages in this conversation.")
+
+    /// A session saved to the agent's store, with a conversation id as the panel gives it, and a model provider
+    /// for the turns another provider answers.
+    private func makeStoredSession(_ run: FakeACPRun, replies: [String]) -> AgentSession {
+        let provider = FakeProvider(responses: replies.map { FakeProvider.reply($0) })
+        let session = AgentSession(provider: provider, systemPrompt: "Reachly context", toolRunner: AgentToolRunner(host: FakeToolHost(hosts: []), source: .agentPanel, conversationID: UUID()))
+        session.externalAgent = run.agent
+        session.externalSessionStore = run.agent.configuration.sessionStore
+        return session
+    }
+
+    /// Another provider answers: the agent process goes, as it does in the panel.
+    private func switchAway(_ session: AgentSession, _ run: FakeACPRun) {
+        session.externalAgent = nil
+        run.agent.shutdown()
+    }
+
+    @Test func aSessionThatMissedAnotherProvidersTurnIsNotLoadedAgain() async throws {
+        let run = FakeACPRun("loadable", store: true)
+        defer { run.finish() }
+        let session = makeStoredSession(run, replies: ["From the other provider."])
+        session.send("first")
+        await waitUntilDone(session)
+
+        switchAway(session, run)
+        session.send("second")
+        await waitUntilDone(session)
+        #expect(session.messages.last?.text == "From the other provider.")
+
+        session.externalAgent = run.agent
+        session.send("third")
+        await waitUntilDone(session)
+        #expect(run.received("session/load").isEmpty, "the saved session never saw the second message")
+        #expect(run.received("session/new").count == 2)
+        #expect(session.messages.last?.blocks.contains(Self.newSessionNotice) == true, "the transcript says so")
+        let prompt = try #require(run.received("session/prompt").last)
+        #expect(prompt["params"]?["prompt"]?.arrayValue?.first?["text"]?.stringValue == "Reachly context", "a new session gets the context")
+    }
+
+    @Test func anEditWhileAnotherProviderAnswersForgetsTheSavedSession() async throws {
+        let run = FakeACPRun("loadable", store: true)
+        defer { run.finish() }
+        let session = makeStoredSession(run, replies: [])
+        let key = session.externalConversationKey
+        session.send("first")
+        await waitUntilDone(session)
+        session.send("second")
+        await waitUntilDone(session)
+        #expect(run.agent.configuration.sessionStore?.sessionID(for: key) == "sess-1")
+
+        switchAway(session, run)
+        let second = try #require(session.messages.last { $0.role == .user && $0.text == "second" })
+        session.rewind(to: second.id)
+        #expect(run.agent.configuration.sessionStore?.sessionID(for: key) == nil, "forgotten with no agent running")
+
+        session.externalAgent = run.agent
+        session.send("second, edited")
+        await waitUntilDone(session)
+        #expect(run.received("session/load").isEmpty)
+        #expect(run.received("session/new").count == 2)
+        #expect(session.messages.last?.blocks.contains(Self.newSessionNotice) == true)
+    }
+
+    @Test func aSessionIsUsedAgainOnlyWhenItSawEverythingBefore() {
+        let first = AgentMessage.user("first")
+        let second = AgentMessage.user("second")
+        let turn = ExternalAgentTurn(conversationKey: "A", message: second, context: "", hasEarlierTurns: true, previousUserMessageID: first.id)
+        #expect(ACPAgent.knowsEverythingBefore(turn, lastMessage: first.id))
+        #expect(ACPAgent.knowsEverythingBefore(turn, lastMessage: second.id), "Retry sends the same message again")
+        #expect(!ACPAgent.knowsEverythingBefore(turn, lastMessage: UUID()), "it missed a message")
+        #expect(!ACPAgent.knowsEverythingBefore(turn, lastMessage: nil), "saved before Reachly kept the message, or never sent one")
+        let opening = ExternalAgentTurn(conversationKey: "A", message: first, context: "", hasEarlierTurns: false)
+        #expect(ACPAgent.knowsEverythingBefore(opening, lastMessage: nil))
+    }
+
+    @Test func theSameAgentAnsweringEveryTurnLoadsItsSessionBack() async throws {
+        let run = FakeACPRun("loadable", store: true)
+        defer { run.finish() }
+        let session = makeStoredSession(run, replies: [])
+        session.send("first")
+        await waitUntilDone(session)
+        run.agent.shutdown()
+        session.send("second")
+        await waitUntilDone(session)
+        #expect(run.received("session/load").count == 1, "nothing was missed, so the session comes back")
+        #expect(!(session.messages.last?.blocks.contains(Self.newSessionNotice) ?? true))
+    }
+
     @Test func editingAnEarlierMessageStartsANewAgentSession() async throws {
         let run = FakeACPRun("basic")
         defer { run.finish() }
@@ -158,6 +247,80 @@ struct AgentSessionExternalAgentTests {
         session.send("first, edited")
         await waitUntilDone(session)
         #expect(run.received("session/new").count == 2)
+    }
+}
+
+// MARK: - Server commands a turn asked for
+
+@Suite("Server commands an ACP agent asked for", .serialized)
+@MainActor
+struct ExternalAgentApprovalTests {
+    /// Reachly's MCP server with web-01, which asks before every command, and sheets that wait.
+    private func startServer() async throws -> (MCPServer, FakeToolHost, WaitingApprovals, Int) {
+        let host = FakeToolHost(hosts: [FakeToolHost.web])
+        let approvals = WaitingApprovals()
+        host.approval = { request in await approvals.ask(request) }
+        let server = MCPServer(toolHost: host, token: "secret-token", serverVersion: "test")
+        let port = try await server.start(port: 0)
+        return (server, host, approvals, port)
+    }
+
+    @Test func stopTakesDownTheSheetForACommandTheAgentAskedFor() async throws {
+        let (server, host, approvals, port) = try await startServer()
+        defer { Task { await server.stop() } }
+        let run = FakeACPRun("mcp-call", environment: ["FAKE_ACP_MCP_PORT": "\(port)", "FAKE_ACP_MCP_TOKEN": "secret-token"])
+        defer { run.finish() }
+        run.agent.turnEndHandler = { key in approvals.withdraw(from: "Qoder", conversationKey: key) }
+        let conversation = UUID()
+        let task = Task { try await run.run(run.turn(key: conversation.uuidString)) }
+        await waitFor { !approvals.waiting.isEmpty }
+        #expect(approvals.waiting.first?.request.requester == "Qoder")
+        #expect(approvals.waiting.first?.request.conversationID == conversation)
+
+        task.cancel()
+        // Taken down at Stop, without waiting for the agent to answer the prompt.
+        await waitFor(.seconds(2)) { approvals.waiting.isEmpty }
+        #expect(approvals.waiting.isEmpty)
+        #expect(try await task.value == .cancelled)
+        if case .withdrawn = approvals.answers.first {} else { Issue.record("expected the sheet withdrawn, got \(approvals.answers)") }
+        await waitFor { !run.httpAnswers.isEmpty }
+        #expect(run.httpAnswers.first?.contains("Not run") == true, "the agent hears that nothing ran")
+        #expect(host.executed.isEmpty, "clicking Run afterwards can't run it: the sheet is gone")
+        #expect(host.auditRecords.map(\.decision) == [.cancelled])
+        #expect(host.auditRecords.first?.conversationID == conversation)
+    }
+
+    @Test func aCrashTakesDownTheSheetForACommandTheAgentAskedFor() async throws {
+        let (server, host, approvals, port) = try await startServer()
+        defer { Task { await server.stop() } }
+        let directory = FileManager.default.temporaryDirectory.appending(path: "reachly-acp-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let trigger = directory.appending(path: "crash-now")
+        let run = FakeACPRun("mcp-crash", directory: directory, environment: ["FAKE_ACP_MCP_PORT": "\(port)", "FAKE_ACP_MCP_TOKEN": "secret-token", "FAKE_ACP_TRIGGER": trigger.path])
+        defer { run.finish() }
+        run.agent.turnEndHandler = { key in approvals.withdraw(from: "Qoder", conversationKey: key) }
+        let task = Task { try await run.run(run.turn(key: UUID().uuidString)) }
+        await waitFor { !approvals.waiting.isEmpty }
+        #expect(approvals.waiting.count == 1)
+        FileManager.default.createFile(atPath: trigger.path, contents: Data())
+        await #expect(throws: ExternalAgentFailure.self) { _ = try await task.value }
+        await waitFor(.seconds(5)) { approvals.waiting.isEmpty }
+        #expect(approvals.waiting.isEmpty)
+        #expect(host.executed.isEmpty)
+        #expect(host.auditRecords.map(\.decision) == [.cancelled])
+    }
+
+    @Test func aRequestFromTheAgentIsMatchedToItsConversation() {
+        let conversation = UUID()
+        let request = AgentApprovalRequest(source: .mcp, host: FakeToolHost.web, tool: "run_command", command: "df -h", reason: "", detail: "", isDestructive: false, requester: "Qoder", conversationID: conversation)
+        #expect(request.isFrom("Qoder", conversationKey: conversation.uuidString))
+        #expect(!request.isFrom("Qoder", conversationKey: UUID().uuidString))
+        #expect(!request.isFrom("Claude", conversationKey: conversation.uuidString))
+        var plain = request
+        plain.requester = nil
+        #expect(!plain.isFrom("Qoder", conversationKey: conversation.uuidString), "another MCP client's sheet stays")
+        var unnamed = request
+        unnamed.conversationID = nil
+        #expect(unnamed.isFrom("Qoder", conversationKey: conversation.uuidString))
     }
 }
 

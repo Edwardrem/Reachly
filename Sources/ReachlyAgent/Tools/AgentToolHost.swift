@@ -53,10 +53,13 @@ public struct AgentApprovalRequest: Sendable, Identifiable {
     /// Who asked, when an MCP client said so and Reachly knows it (Qoder in the chat panel). Nil for the panel's
     /// own provider and for MCP clients that did not say.
     public var requester: String?
+    /// The panel conversation the command is audited under, when there is one.
+    public var conversationID: UUID?
 
-    public init(id: UUID = UUID(), source: AgentActionSource, host: AgentHostInfo, tool: String, command: String, reason: String, detail: String, isDestructive: Bool, requester: String? = nil) {
+    public init(id: UUID = UUID(), source: AgentActionSource, host: AgentHostInfo, tool: String, command: String, reason: String, detail: String, isDestructive: Bool, requester: String? = nil, conversationID: UUID? = nil) {
         self.id = id
         self.requester = requester
+        self.conversationID = conversationID
         self.source = source
         self.host = host
         self.tool = tool
@@ -73,6 +76,15 @@ public struct AgentApprovalRequest: Sendable, Identifiable {
     /// the sheet shows it read-only, offers no Run Edited Command, sends a
     /// comment alone, and the runner refuses an `.edited` answer.
     public var isCommandEditable: Bool { tool == AgentToolName.runCommand.rawValue }
+
+    /// Whether `requester`, an agent Reachly runs itself (Qoder in the chat panel), asked for this in the
+    /// conversation `conversationKey` (`AgentSession.externalConversationKey`). A request from that agent that
+    /// names no conversation belongs to whichever turn it runs, so it matches too.
+    public func isFrom(_ requester: String, conversationKey: String) -> Bool {
+        guard self.requester == requester else { return false }
+        guard let conversationID else { return true }
+        return UUID(uuidString: conversationKey) == conversationID
+    }
 }
 
 public enum AgentApprovalResponse: Sendable, Equatable {
@@ -85,6 +97,9 @@ public enum AgentApprovalResponse: Sendable, Equatable {
     /// one) and can call the tool again with a revised command.
     case requestChanges(comment: String, editedCommand: String?)
     case denied
+    /// Nobody can answer any more: the turn that asked ended first (Stop, an error, the agent going away), so
+    /// the sheet was taken down. Nothing runs, and the audit log records it as cancelled, with this reason.
+    case withdrawn(String)
 
     /// The longest comment the approval sheet sends, in characters.
     public static let commentLimit = 2_000

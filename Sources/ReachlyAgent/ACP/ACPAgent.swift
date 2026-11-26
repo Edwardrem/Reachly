@@ -14,8 +14,13 @@ public final class ACPAgent: ExternalAgent {
         /// Who answers, in messages ("Qoder").
         public var name: String
         public var executable: String
-        /// Tried in order until one answers `initialize`. Qoder's docs give `--acp`; Zed's listing gives `acp`.
+        /// The first is tried first. A later one is tried only when the agent exits saying it doesn't know an
+        /// argument (`unknown option '--acp'`), and then the next one without that argument: never after a
+        /// timeout, a sign-in error or a crash. Qoder's docs give `--acp`; Zed's listing gives `acp`.
         public var argumentSets: [[String]]
+        /// Said once in the transcript when the agent started without one of these arguments because it refused
+        /// it, such as a permission setting the agent's version doesn't take.
+        public var fallbackNotices: [String: String]
         public var environment: [String: String]
         /// The agent's working directory and every session's `cwd`: a folder Reachly owns, never the home folder.
         public var workingDirectory: URL
@@ -37,6 +42,7 @@ public final class ACPAgent: ExternalAgent {
             name: String,
             executable: String,
             argumentSets: [[String]],
+            fallbackNotices: [String: String] = [:],
             environment: [String: String],
             workingDirectory: URL,
             mcpServers: @escaping @Sendable (_ conversationKey: String) -> [ACPProtocol.StdioMCPServer],
@@ -51,6 +57,7 @@ public final class ACPAgent: ExternalAgent {
             self.name = name
             self.executable = executable
             self.argumentSets = argumentSets
+            self.fallbackNotices = fallbackNotices
             self.environment = environment
             self.workingDirectory = workingDirectory
             self.mcpServers = mcpServers
@@ -69,6 +76,11 @@ public final class ACPAgent: ExternalAgent {
 
     /// Asks the user before one of the agent's own tools runs. With none, every request is rejected.
     public var permissionHandler: (@MainActor (AgentPermissionRequest) async -> AgentPermissionDecision)?
+    /// Called with the conversation's key when a turn ends for any reason: answered, stopped, failed, or the
+    /// agent gone. Stop calls it at once, without waiting for the agent to wind down. Whatever still waits on
+    /// the turn elsewhere, such as an approval sheet for a server command the agent asked for through Reachly's
+    /// MCP server, can then be taken down: nobody is left to use its answer.
+    public var turnEndHandler: (@MainActor (_ conversationKey: String) -> Void)?
 
     /// What the agent said about itself, while it runs.
     public private(set) var agentInfo: ACPProtocol.AgentInfo?
@@ -79,6 +91,13 @@ public final class ACPAgent: ExternalAgent {
     /// A turn is in progress.
     public var isBusy: Bool { turn != nil }
 
+    /// A turn for this conversation (for any, with nil) is in progress and was not stopped: only then can a
+    /// request the agent makes for it (a server command through the MCP server) still be answered.
+    public func isAnswering(_ conversationKey: String?) -> Bool {
+        guard let turn, !turn.cancelled else { return false }
+        return conversationKey.map { $0 == turn.conversationKey } ?? true
+    }
+
     /// Makes the transport for one launch; tests can hand in their own.
     var makeTransport: (Configuration, [String]) throws -> any ACPTransport = { configuration, arguments in
         try FileManager.default.createDirectory(at: configuration.workingDirectory, withIntermediateDirectories: true)
@@ -86,8 +105,15 @@ public final class ACPAgent: ExternalAgent {
     }
 
     private var connection: ACPConnection?
-    /// The session each conversation uses in the running agent.
-    private var liveSessions: [String: String] = [:]
+    /// What the next turn says about how the agent was started (`fallbackNotices`).
+    private var launchNotices: [String] = []
+    /// The session each conversation uses in the running agent, and the last of its messages that session was sent.
+    private var liveSessions: [String: LiveSession] = [:]
+
+    private struct LiveSession {
+        var id: String
+        var lastMessage: UUID?
+    }
     /// The session being restored with `session/load`: its replayed history is already in the transcript.
     private var replaying: String?
     private var turn: TurnState?
@@ -95,6 +121,7 @@ public final class ACPAgent: ExternalAgent {
     private struct TurnState {
         let id = UUID()
         let sessionID: String
+        let conversationKey: String
         let events: @MainActor (ExternalAgentEvent) -> Void
         var toolCalls: [String: AgentToolActivity] = [:]
         var permissionTasks: [UUID: Task<AgentPermissionDecision, Never>] = [:]
@@ -111,10 +138,14 @@ public final class ACPAgent: ExternalAgent {
         guard self.turn == nil else {
             throw ExternalAgentFailure(kind: .setup, message: "\(name) is still answering another message.")
         }
+        // However the turn ends, nothing may keep waiting on it.
+        defer { turnEndHandler?(turn.conversationKey) }
         let connection = try await connect()
         events(.started(agent: agentInfo?.label))
+        for notice in launchNotices { events(.notice(notice)) }
+        launchNotices = []
         try Task.checkCancellation()
-        let (sessionID, isNew) = try await session(for: turn.conversationKey, on: connection)
+        let (sessionID, isNew) = try await session(for: turn, on: connection)
         if isNew, turn.hasEarlierTurns {
             events(.notice("\(name) started a new session, so it doesn't know the earlier messages in this conversation."))
         }
@@ -122,10 +153,13 @@ public final class ACPAgent: ExternalAgent {
         let info = agentInfo ?? ACPProtocol.AgentInfo()
         let content = ACPProtocol.promptContent(for: turn.message, context: isNew ? turn.context : nil, agent: info)
 
-        let state = TurnState(sessionID: sessionID, events: events)
+        let state = TurnState(sessionID: sessionID, conversationKey: turn.conversationKey, events: events)
         let turnID = state.id
         self.turn = state
-        defer { if self.turn?.id == turnID { self.turn = nil } }
+        defer { endTurn(turnID) }
+        // From here the session has been sent this message: a later turn may use it again.
+        liveSessions[turn.conversationKey]?.lastMessage = turn.message.id
+        configuration.sessionStore?.set(sessionID, for: turn.conversationKey, lastMessage: turn.message.id)
         do {
             let result = try await withTaskCancellationHandler {
                 try await connection.request("session/prompt", params: ACPProtocol.promptParams(sessionID: sessionID, content: content))
@@ -166,8 +200,10 @@ public final class ACPAgent: ExternalAgent {
     private func connect() async throws -> ACPConnection {
         if let connection, connection.isOpen, agentInfo != nil { return connection }
         shutdown()
-        var problem = ""
-        for arguments in configuration.argumentSets {
+        let sets = configuration.argumentSets
+        var index = 0
+        while index < sets.count {
+            let arguments = sets[index]
             try Task.checkCancellation()
             let transport: any ACPTransport
             do {
@@ -196,6 +232,9 @@ public final class ACPAgent: ExternalAgent {
                     on: connection)
                 agentInfo = try ACPProtocol.agentInfo(from: result)
                 launchArguments = arguments
+                launchNotices = configuration.fallbackNotices.keys.sorted()
+                    .filter { sets.first?.contains($0) == true && !arguments.contains($0) }
+                    .compactMap { configuration.fallbackNotices[$0] }
                 self.connection = connection
                 return connection
             } catch is CancellationError {
@@ -203,31 +242,54 @@ public final class ACPAgent: ExternalAgent {
                 throw CancellationError()
             } catch {
                 connection.close()
-                if case ACPError.agentExited(let exit) = error {
-                    problem = Self.errorSummary(exit.standardError).map { " It said: \($0)" } ?? ""
-                } else if case ACPError.timedOut = error {
-                    problem = " It didn't answer within \(configuration.initializeTimeout.components.seconds) seconds."
-                } else {
-                    problem = " " + (error.localizedDescription)
+                // Another form only for an argument the agent said it doesn't know.
+                if case ACPError.agentExited(let exit) = error, !exit.wasStopped,
+                   let refused = ACPLaunch.refusedArgument(in: exit.standardError, among: arguments),
+                   let next = sets.indices.dropFirst(index + 1).first(where: { !sets[$0].contains(refused) }) {
+                    index = next
+                    continue
                 }
+                throw startFailure(error)
             }
         }
-        throw ExternalAgentFailure(kind: .setup, message: "\(name) didn't start in ACP mode.\(problem)")
+        throw ExternalAgentFailure(kind: .setup, message: "\(name) didn't start in ACP mode.")
+    }
+
+    /// Why the agent didn't start, for the failure row.
+    private func startFailure(_ error: any Error) -> ExternalAgentFailure {
+        let problem: String
+        switch error as? ACPError {
+        case .rpc(_, let code, _)? where code == ACPError.authRequiredCode:
+            return failure(for: error, during: "starting")
+        case .agentExited(let exit)?:
+            let status = exit.status.map { " (exit status \($0))" } ?? ""
+            problem = " It stopped\(status)." + (Self.errorSummary(exit.standardError).map { " It said: \($0)" } ?? "")
+        case .timedOut?:
+            problem = " It didn't answer within \(configuration.initializeTimeout.components.seconds) seconds."
+        default:
+            problem = " " + error.localizedDescription
+        }
+        return ExternalAgentFailure(kind: .setup, message: "\(name) didn't start in ACP mode.\(problem)")
     }
 
     /// The conversation's session in the running agent: the live one, the one it had before when the agent can
     /// load it, or a new one. True when the session is new, so it has none of the conversation's history.
-    private func session(for conversationKey: String, on connection: ACPConnection) async throws -> (String, Bool) {
-        if let live = liveSessions[conversationKey] { return (live, false) }
+    private func session(for turn: ExternalAgentTurn, on connection: ACPConnection) async throws -> (String, Bool) {
+        let conversationKey = turn.conversationKey
+        if let live = liveSessions[conversationKey] {
+            if Self.knowsEverythingBefore(turn, lastMessage: live.lastMessage) { return (live.id, false) }
+            liveSessions[conversationKey] = nil
+        }
         let cwd = configuration.workingDirectory
         let servers = configuration.mcpServers(conversationKey)
-        if agentInfo?.loadSession == true, let saved = configuration.sessionStore?.sessionID(for: conversationKey) {
-            replaying = saved
+        if agentInfo?.loadSession == true, let saved = configuration.sessionStore?.saved(for: conversationKey),
+           Self.knowsEverythingBefore(turn, lastMessage: saved.lastMessage) {
+            replaying = saved.session
             defer { replaying = nil }
             do {
-                _ = try await setupRequest("session/load", params: ACPProtocol.loadSessionParams(sessionID: saved, cwd: cwd, mcpServers: servers), timeout: configuration.sessionTimeout, on: connection)
-                liveSessions[conversationKey] = saved
-                return (saved, false)
+                _ = try await setupRequest("session/load", params: ACPProtocol.loadSessionParams(sessionID: saved.session, cwd: cwd, mcpServers: servers), timeout: configuration.sessionTimeout, on: connection)
+                liveSessions[conversationKey] = LiveSession(id: saved.session, lastMessage: saved.lastMessage)
+                return (saved.session, false)
             } catch let error as ACPError {
                 // Gone, expired or unreadable: start a new one, unless the agent itself went away.
                 if case .agentExited = error { throw failure(for: error, during: "loading the session") }
@@ -236,7 +298,7 @@ public final class ACPAgent: ExternalAgent {
         do {
             let result = try await setupRequest("session/new", params: ACPProtocol.newSessionParams(cwd: cwd, mcpServers: servers), timeout: configuration.sessionTimeout, on: connection)
             let id = try ACPProtocol.sessionID(from: result)
-            liveSessions[conversationKey] = id
+            liveSessions[conversationKey] = LiveSession(id: id, lastMessage: nil)
             configuration.sessionStore?.set(id, for: conversationKey)
             return (id, true)
         } catch is CancellationError {
@@ -244,6 +306,12 @@ public final class ACPAgent: ExternalAgent {
         } catch {
             throw failure(for: error, during: "starting a session")
         }
+    }
+
+    /// Whether a session last sent `lastMessage` has everything before this turn: it was sent the user message
+    /// just before this one, or this one itself (Retry after a failure).
+    static func knowsEverythingBefore(_ turn: ExternalAgentTurn, lastMessage: UUID?) -> Bool {
+        lastMessage == turn.previousUserMessageID || lastMessage == turn.message.id
     }
 
     /// A request made before the prompt (initialize, session/new, session/load). ACP has no way to cancel
@@ -272,12 +340,21 @@ public final class ACPAgent: ExternalAgent {
         connection?.notify("session/cancel", params: ACPProtocol.cancelParams(sessionID: state.sessionID))
         for task in state.permissionTasks.values { task.cancel() }
         markUnfinishedCalls(.cancelled)
+        turnEndHandler?(state.conversationKey)
         let grace = configuration.cancelGrace
         Task { [weak self] in
             try? await Task.sleep(for: grace)
             guard let self, self.turn?.id == turnID else { return }
             self.shutdown()
         }
+    }
+
+    /// The turn is over: a permission request still waiting (the agent answered the prompt without waiting for
+    /// it, or went away) is answered as cancelled, so its sheet goes.
+    private func endTurn(_ turnID: UUID) {
+        guard let state = turn, state.id == turnID else { return }
+        turn = nil
+        for task in state.permissionTasks.values { task.cancel() }
     }
 
     private func markUnfinishedCalls(_ status: AgentToolActivity.Status) {
@@ -404,9 +481,34 @@ public final class ACPAgent: ExternalAgent {
             .filter { !$0.isEmpty }
             .suffix(lines)
         guard !kept.isEmpty else { return nil }
-        var text = kept.joined(separator: " · ")
-        text = text.replacingOccurrences(of: #"[A-Za-z0-9_\-+]{32,}"#, with: "…", options: .regularExpression)
+        var text = maskingSecrets(kept.joined(separator: " · "))
         if text.count > characters { text = "…" + text.suffix(characters - 1) }
         return text
+    }
+
+    /// A value after a word that names a secret: `password=…`, `ACCESS_TOKEN: …`, `Authorization: Bearer …`,
+    /// `"api_key": "…"`, `token …`. Group 1 is the word, 2 what separates it from the value, 4 the value.
+    nonisolated private static let keyedSecret = try! NSRegularExpression(
+        pattern: #"(?i)(?<![a-z])(token|key|secret|password|passwd|bearer|authorization)(?![a-z])(["']?\s*[:=]\s*["']?|\s+)((?:bearer|basic|token)\s+)?([^\s"'<>,;&]+)"#)
+
+    /// Anything long enough to be a token on its own, including base64 (`+`, `/`, `=`) and URL encoding (`%`).
+    nonisolated private static let longToken = try! NSRegularExpression(pattern: #"[A-Za-z0-9_\-+/=%]{32,}"#)
+
+    /// `text` with anything that looks like a secret replaced by `…`. After a word that names one, the value goes
+    /// when it follows `=` or `:` (any length for a password or secret, 8 characters or more for the rest) or a
+    /// space (20 or more, so `token expired` stays); anything of 32 such characters goes wherever it is.
+    nonisolated static func maskingSecrets(_ text: String) -> String {
+        let source = text as NSString
+        var masked = text
+        for match in keyedSecret.matches(in: text, range: NSRange(location: 0, length: source.length)).reversed() {
+            let word = source.substring(with: match.range(at: 1)).lowercased()
+            let separator = source.substring(with: match.range(at: 2))
+            let value = source.substring(with: match.range(at: 4))
+            let explicit = separator.contains(":") || separator.contains("=")
+            let minimum = explicit ? (["password", "passwd", "secret"].contains(word) ? 1 : 8) : 20
+            guard value.count >= minimum, let range = Range(match.range(at: 4), in: masked) else { continue }
+            masked.replaceSubrange(range, with: "…")
+        }
+        return longToken.stringByReplacingMatches(in: masked, range: NSRange(masked.startIndex..., in: masked), withTemplate: "…")
     }
 }

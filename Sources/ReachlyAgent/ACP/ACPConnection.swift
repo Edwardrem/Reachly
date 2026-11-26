@@ -28,10 +28,12 @@ public enum ACPError: LocalizedError, Equatable {
 /// agent, and the agent sends its own requests (`session/request_permission`) and notifications
 /// (`session/update`) back.
 ///
-/// Every incoming message is handled on the main actor, one at a time, in the order the agent wrote it, so all
-/// the `session/update` notifications the agent sent before answering `session/prompt` have been handled by
-/// the time that answer resumes its caller (ACP sends a turn's updates before its response). An agent request
-/// runs in a task of its own, so a permission sheet that waits for the user does not hold up the updates.
+/// Every incoming message is parsed off the main actor and then handled on it, one at a time, in the order the
+/// agent wrote it, so all the `session/update` notifications the agent sent before answering `session/prompt`
+/// have been handled by the time that answer resumes its caller (ACP sends a turn's updates before its
+/// response). An agent request runs in a task of its own, so a permission sheet that waits for the user does not
+/// hold up the updates. Each message is reported handled to the transport, which stops reading an agent that
+/// gets too far ahead.
 @MainActor
 public final class ACPConnection {
     /// Handles a request from the agent and returns its result. A thrown `JSONRPC.ErrorObject` is sent as that
@@ -55,15 +57,27 @@ public final class ACPConnection {
     public init(transport: any ACPTransport) {
         self.transport = transport
         let events = transport.events
-        reader = Task { [weak self] in
+        reader = Task.detached { [weak self, transport] in
             for await event in events {
-                guard let self else { return }
                 switch event {
-                case .message(let line): self.handle(line)
-                case .closed(let exit): self.closed(exit)
+                case .message(let line):
+                    // A large line is parsed here, not on the main actor.
+                    let message = try? JSONValue.parse(line)
+                    guard let self else { return }
+                    await self.handle(message)
+                    transport.didHandle(byteCount: line.count)
+                case .closed(let exit):
+                    guard let self else { return }
+                    await self.closed(exit)
                 }
             }
         }
+    }
+
+    /// A connection nobody holds can't answer the agent any more, so the agent is stopped: it would otherwise
+    /// wait for a reader that never comes back.
+    deinit {
+        transport.close()
     }
 
     public var isOpen: Bool { exit == nil }
@@ -110,8 +124,8 @@ public final class ACPConnection {
 
     // MARK: Incoming
 
-    private func handle(_ line: Data) {
-        guard let message = try? JSONValue.parse(line), message.objectValue != nil else {
+    private func handle(_ parsed: JSONValue?) {
+        guard let message = parsed, message.objectValue != nil else {
             unreadableLines += 1
             return
         }

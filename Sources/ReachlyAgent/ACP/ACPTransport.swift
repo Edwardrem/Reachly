@@ -34,6 +34,13 @@ public protocol ACPTransport: AnyObject, Sendable {
     func send(_ framed: Data)
     /// Stops the agent. `.closed` follows.
     func close()
+    /// The reader is done with one `.message` of this many bytes, so the transport can read more. A transport
+    /// that buffers without a limit needs nothing here.
+    func didHandle(byteCount: Int)
+}
+
+extension ACPTransport {
+    public func didHandle(byteCount: Int) {}
 }
 
 /// An ACP agent running as a child process: JSON-RPC on its standard input and output, its standard error kept
@@ -54,6 +61,22 @@ public final class ACPProcess: ACPTransport {
     /// After SIGTERM, how long the group has before SIGKILL.
     public static let terminationGrace: TimeInterval = 2
 
+    /// How much the agent may have written that the reader has not handled yet. Past it, the agent's output is
+    /// not read until the reader catches up, so its writes wait in the pipe: one that floods Reachly with
+    /// updates slows down instead of growing Reachly's memory. A single message may be larger than `bytes`
+    /// (up to the framer's 32 MB): it goes through on its own.
+    public struct BacklogLimit: Sendable {
+        public var messages: Int
+        public var bytes: Int
+
+        public init(messages: Int, bytes: Int) {
+            self.messages = messages
+            self.bytes = bytes
+        }
+
+        public static let standard = BacklogLimit(messages: 1024, bytes: 8 << 20)
+    }
+
     public let events: AsyncStream<ACPTransportEvent>
     public let pid: pid_t
 
@@ -68,12 +91,26 @@ public final class ACPProcess: ACPTransport {
     }
 
     private let state = Mutex(State())
+
+    private struct Backlog {
+        var messages = 0
+        var bytes = 0
+        /// The most messages ever waiting at once, for tests.
+        var highWater = 0
+    }
+
+    private let backlogLimit: BacklogLimit
+    private let backlog = Mutex(Backlog())
+    /// Signalled when the reader handles a message; the output thread waits on it while the backlog is full. A
+    /// reader that goes away closes the transport (`ACPConnection` does so when it is let go), which ends the wait.
+    private let roomMade = DispatchSemaphore(value: 0)
     private let continuation: AsyncStream<ACPTransportEvent>.Continuation
     private let stdinDescriptor: Int32
     private let writer = DispatchQueue(label: "io.github.edwardrem.reachly.acp.stdin")
 
     /// Starts `executable` with `arguments` in `currentDirectory`. Throws when it cannot be started.
-    public init(executable: String, arguments: [String], environment: [String: String], currentDirectory: URL?) throws {
+    public init(executable: String, arguments: [String], environment: [String: String], currentDirectory: URL?, backlogLimit: BacklogLimit = .standard) throws {
+        self.backlogLimit = backlogLimit
         func makePipe() -> (read: Int32, write: Int32)? {
             var ends: [Int32] = [-1, -1]
             guard pipe(&ends) == 0 else { return nil }
@@ -108,6 +145,7 @@ public final class ACPProcess: ACPTransport {
         stdinDescriptor = input.write
         // A write after the agent has gone must fail with EPIPE, not raise SIGPIPE in the app.
         _ = fcntl(input.write, F_SETNOSIGPIPE, 1)
+        // Unbounded here, because dropping a message would break JSON-RPC; `backlogLimit` bounds it instead.
         (events, continuation) = AsyncStream.makeStream(of: ACPTransportEvent.self, bufferingPolicy: .unbounded)
 
         let outputDescriptor = output.read
@@ -142,6 +180,17 @@ public final class ACPProcess: ACPTransport {
         }
     }
 
+    public func didHandle(byteCount: Int) {
+        backlog.withLock { backlog in
+            backlog.messages = max(0, backlog.messages - 1)
+            backlog.bytes = max(0, backlog.bytes - byteCount)
+        }
+        roomMade.signal()
+    }
+
+    /// The most messages that were ever waiting for the reader at once.
+    public var backlogHighWater: Int { backlog.withLock { $0.highWater } }
+
     public func close() {
         let first = state.withLock { state -> Bool in
             defer { state.stopRequested = true }
@@ -173,10 +222,10 @@ public final class ACPProcess: ACPTransport {
             if count < 0, errno == EINTR { continue }
             guard count > 0 else { break }
             for line in framer.append(Data(chunk[0..<count])) {
-                continuation.yield(.message(line))
+                deliver(line)
             }
         }
-        if let last = framer.finish() { continuation.yield(.message(last)) }
+        if let last = framer.finish() { deliver(last) }
         Darwin.close(descriptor)
         state.withLock { $0.reachedEndOfOutput = true }
         if !finishIfDone() {
@@ -186,6 +235,25 @@ public final class ACPProcess: ACPTransport {
                 if state.withLock({ $0.exitStatus == nil }) { close() }
             }
         }
+    }
+
+    /// Hands one message to the reader, first waiting while the backlog is full, unless the agent is being
+    /// stopped.
+    private func deliver(_ line: Data) {
+        while true {
+            let full = backlog.withLock { backlog in
+                backlog.messages > 0
+                    && (backlog.messages >= backlogLimit.messages || backlog.bytes + line.count > backlogLimit.bytes)
+            }
+            if !full || state.withLock({ $0.stopRequested }) { break }
+            _ = roomMade.wait(timeout: .now() + .milliseconds(100))
+        }
+        backlog.withLock { backlog in
+            backlog.messages += 1
+            backlog.bytes += line.count
+            backlog.highWater = max(backlog.highWater, backlog.messages)
+        }
+        continuation.yield(.message(line))
     }
 
     private func readStandardError(_ descriptor: Int32) {

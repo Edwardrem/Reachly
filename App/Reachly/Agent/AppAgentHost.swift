@@ -71,6 +71,10 @@ final class AppAgentHost: AgentToolHost {
     private let context: ModelContext
     private let workspace: Workspace
     private let appState: AppState
+    /// Whether the agent Reachly runs for the chat panel (Qoder) is still answering the turn a request of its
+    /// belongs to. Set by the panel. A request from that agent with no turn left to answer gets no sheet: the
+    /// panel's reply ended (Stop, an error, the agent going away), so nobody is waiting for the command.
+    var externalAgentIsAnswering: ((AgentApprovalRequest) -> Bool)?
 
     init(context: ModelContext, workspace: Workspace, appState: AppState) {
         self.context = context
@@ -111,6 +115,9 @@ final class AppAgentHost: AgentToolHost {
     }
 
     func approve(_ request: AgentApprovalRequest) async -> AgentApprovalResponse {
+        if let requester = request.requester, externalAgentIsAnswering?(request) != true {
+            return .withdrawn("\(requester) asked after its reply in the chat panel had ended.")
+        }
         let prompt = AgentApprovalPrompt(request: request)
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
@@ -125,6 +132,16 @@ final class AppAgentHost: AgentToolHost {
             }
         } onCancel: {
             Task { @MainActor in prompt.resume(.denied) }
+        }
+    }
+
+    /// Takes down the approval sheets `requester` (Qoder in the chat panel) is still waiting on for this
+    /// conversation, because the turn that asked ended: Stop, an error, the agent going away, or its answer.
+    /// Nothing runs, and each is audited as cancelled.
+    func withdrawApprovals(from requester: String, conversationKey: String) {
+        let waiting = appState.pendingApprovals.filter { $0.request.isFrom(requester, conversationKey: conversationKey) }
+        for prompt in waiting {
+            prompt.resume(.withdrawn("\(requester)'s reply in the chat panel ended before this was answered."))
         }
     }
 
