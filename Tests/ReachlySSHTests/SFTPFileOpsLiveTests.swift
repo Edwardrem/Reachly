@@ -74,14 +74,12 @@ struct SFTPFileOpsLiveTests {
 
     private static func bytes(_ count: Int, seed: UInt64 = 42) -> Data {
         var state = seed
-        var data = Data(count: count)
-        data.withUnsafeMutableBytes { buffer in
-            for index in 0..<count {
-                state = state &* 6364136223846793005 &+ 1442695040888963407
-                buffer[index] = UInt8(truncatingIfNeeded: state >> 33)
-            }
+        var bytes = [UInt8](repeating: 0, count: count)
+        for index in 0..<count {
+            state = state &* 6364136223846793005 &+ 1442695040888963407
+            bytes[index] = UInt8(truncatingIfNeeded: state >> 33)
         }
-        return data
+        return Data(bytes)
     }
 
     private static func exists(_ path: String, _ sftp: SFTPClient) async -> Bool {
