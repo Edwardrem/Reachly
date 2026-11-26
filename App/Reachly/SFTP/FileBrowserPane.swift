@@ -11,11 +11,22 @@ struct FileBrowserPane: View {
     let side: SFTPWindowModel.Side
     let hosts: [SSHHost]
     let present: (SFTPWindowContentSheet) -> Void
+    /// Asks before deleting; the window shows the confirmation.
+    let confirmDelete: ([FileItem]) -> Void
     @State private var pathDraft = ""
     @State private var isDropTarget = false
+    @FocusState private var focus: FocusTarget?
+
+    private enum FocusTarget: Hashable { case table, path }
 
     private var pane: PaneModel { model.pane(side) }
+    private var otherPane: PaneModel { model.pane(side == .left ? .right : .left) }
     private var isFocused: Bool { model.focusedSide == side }
+
+    /// Makes this pane the one the toolbar and the shortcuts act on.
+    private func focusPane() {
+        if model.focusedSide != side { model.focusedSide = side }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -47,12 +58,15 @@ struct FileBrowserPane: View {
                 handleDrop(providers, intoFolder: nil)
             }
         }
+        .background(MouseDownWatcher(action: focusPane))
         .overlay {
             if isFocused {
                 Rectangle().strokeBorder(Color.accentColor.opacity(0.35), lineWidth: 1).allowsHitTesting(false)
             }
         }
-        .onTapGesture { model.focusedSide = side }
+        .onChange(of: focus) { _, focus in
+            if focus != nil { focusPane() }
+        }
         .onChange(of: pane.path, initial: true) { _, path in pathDraft = path }
     }
 
@@ -91,7 +105,9 @@ struct FileBrowserPane: View {
             TextField("Path", text: $pathDraft)
                 .textFieldStyle(.roundedBorder)
                 .font(.callout.monospaced())
+                .focused($focus, equals: .path)
                 .onSubmit { Task { await pane.load(pathDraft) } }
+            Button { Task { await pane.refresh() } } label: { Image(systemName: "arrow.clockwise") }.help("Reload")
             if !pane.source.isRemote {
                 Button {
                     let panel = NSOpenPanel()
@@ -152,7 +168,11 @@ struct FileBrowserPane: View {
                 NSWorkspace.shared.open(URL(fileURLWithPath: item.path))
             }
         }
-        .onChange(of: pane.selection) { _, _ in model.focusedSide = side }
+        .focused($focus, equals: .table)
+        .onChange(of: pane.selection) { old, new in
+            // Only a selection that gains items: a refresh dropping vanished items is not the user moving here.
+            if !new.isSubset(of: old) { focusPane() }
+        }
     }
 
     private func dragPaths(for item: FileItem) -> [String] {
@@ -164,10 +184,11 @@ struct FileBrowserPane: View {
         let items = pane.items.filter { ids.contains($0.path) }
         if items.isEmpty {
             Button("New Folder…") { present(.newFolder(side)) }
-            Button("Refresh") { Task { await pane.refresh() } }
+            Divider()
+            Button("Reload") { Task { await pane.refresh() } }
         } else {
-            Button(model.otherPane.source.isRemote ? "Copy to \(model.otherPane.title)" : "Download to \(model.otherPane.title)") {
-                Task { await model.transfer(items, from: pane, to: model.otherPane) }
+            Button(otherPane.source.isRemote ? "Copy to \(otherPane.title)" : "Download to \(otherPane.title)") {
+                Task { await model.transfer(items, from: pane, to: otherPane) }
             }
             if items.count == 1, let item = items.first, !item.isDirectory {
                 if case .remote(let hostID) = pane.source {
@@ -188,7 +209,7 @@ struct FileBrowserPane: View {
                 NSPasteboard.general.setString(items.map(\.path).joined(separator: "\n"), forType: .string)
             }
             Divider()
-            Button("Delete", role: .destructive) { Task { await pane.delete(items) } }
+            Button("Delete", role: .destructive) { confirmDelete(items) }
         }
     }
 
@@ -220,3 +241,45 @@ struct FileBrowserPane: View {
 }
 
 typealias SFTPWindowContentSheet = SFTPWindowContent.PaneSheet
+
+/// Calls `action` on every mouse-down inside this view's frame, before the control under the pointer handles it,
+/// so clicks on the table, its header, the path field and the buttons count as well as the pane's background.
+private struct MouseDownWatcher: NSViewRepresentable {
+    let action: () -> Void
+
+    func makeNSView(context: Context) -> WatcherView {
+        let view = WatcherView()
+        view.action = action
+        return view
+    }
+
+    func updateNSView(_ view: WatcherView, context: Context) {
+        view.action = action
+    }
+
+    final class WatcherView: NSView {
+        var action: (() -> Void)?
+        // Token only; removed when the view leaves its window and in deinit, which Swift 6 does not isolate.
+        nonisolated(unsafe) private var monitor: Any?
+
+        deinit {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
+                MainActor.assumeIsolated {
+                    guard let self, let window = self.window, event.window === window else { return }
+                    if self.bounds.contains(self.convert(event.locationInWindow, from: nil)) { self.action?() }
+                }
+                return event
+            }
+        }
+    }
+}

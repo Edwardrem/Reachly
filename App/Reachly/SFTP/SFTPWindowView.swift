@@ -42,7 +42,7 @@ struct SFTPWindowContent: View {
     @Bindable var model: SFTPWindowModel
     let hosts: [SSHHost]
     @State private var sheet: PaneSheet?
-    @State private var isConfirmingDelete = false
+    @State private var pendingDelete: DeleteRequest?
 
     enum PaneSheet: Identifiable {
         case newFolder(SFTPWindowModel.Side)
@@ -56,23 +56,39 @@ struct SFTPWindowContent: View {
             case .permissions(_, let items): "permissions-\(items.count)"
             }
         }
+
+        var side: SFTPWindowModel.Side {
+            switch self {
+            case .newFolder(let side), .rename(let side, _), .permissions(let side, _): side
+            }
+        }
+    }
+
+    /// A delete waiting for the user to confirm it, with the items as they were when it was asked for.
+    struct DeleteRequest {
+        let side: SFTPWindowModel.Side
+        let source: PaneSource
+        let items: [FileItem]
+
+        var title: String {
+            items.count == 1 ? "Delete “\(items[0].name)”?" : "Delete \(items.count) items?"
+        }
+
+        var message: String {
+            source.isRemote ? "Files on the host are removed permanently; folders are emptied first." : "Local items are moved to the Trash."
+        }
     }
 
     var body: some View {
         VStack(spacing: 0) {
             HSplitView {
-                FileBrowserPane(model: model, side: .left, hosts: hosts) { sheet = $0 }
-                    .frame(minWidth: 320)
-                FileBrowserPane(model: model, side: .right, hosts: hosts) { sheet = $0 }
-                    .frame(minWidth: 320)
+                pane(.left)
+                pane(.right)
             }
+            messages
             Divider()
             TransferListView(queue: model.queue)
                 .frame(height: 170)
-            if let status = model.status ?? model.openWith.message {
-                Divider()
-                Text(status).font(.caption).foregroundStyle(.secondary).lineLimit(1).padding(.horizontal, 10).padding(.vertical, 4).frame(maxWidth: .infinity, alignment: .leading)
-            }
         }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
@@ -102,25 +118,25 @@ struct SFTPWindowContent: View {
                 }
                 .disabled(model.focusedPane.selection.isEmpty)
                 Button(role: .destructive) {
-                    isConfirmingDelete = true
+                    confirmDelete(model.focusedPane.selectedItems, on: model.focusedSide)
                 } label: {
                     Label("Delete", systemImage: "trash")
                 }
                 .disabled(model.focusedPane.selection.isEmpty)
                 Button {
-                    Task { await model.focusedPane.refresh() }
+                    let pane = model.focusedPane
+                    Task { await pane.refresh() }
                 } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
+                    Label("Reload", systemImage: "arrow.clockwise")
                 }
+                .keyboardShortcut("r", modifiers: .command)
+                .help("Reload the focused pane")
             }
         }
-        .confirmationDialog("Delete \(model.focusedPane.selection.count) item(s)?", isPresented: $isConfirmingDelete, titleVisibility: .visible) {
-            Button("Delete", role: .destructive) {
-                let pane = model.focusedPane
-                Task { await pane.delete(pane.selectedItems) }
-            }
-        } message: {
-            Text(model.focusedPane.source.isRemote ? "Files on the host are removed permanently; folders are emptied first." : "Local items are moved to the Trash.")
+        .confirmationDialog(pendingDelete?.title ?? "", isPresented: isConfirmingDelete, titleVisibility: .visible, presenting: pendingDelete) { request in
+            Button("Delete", role: .destructive) { delete(request) }
+        } message: { request in
+            Text(request.message)
         }
         .sheet(item: $sheet) { sheet in
             switch sheet {
@@ -138,7 +154,74 @@ struct SFTPWindowContent: View {
                 }
             }
         }
+        .onChange(of: model.left.source) { _, _ in dropRequests(for: .left) }
+        .onChange(of: model.right.source) { _, _ in dropRequests(for: .right) }
         .onDisappear { model.stop() }
+    }
+
+    private func pane(_ side: SFTPWindowModel.Side) -> some View {
+        FileBrowserPane(model: model, side: side, hosts: hosts, present: { sheet = $0 }, confirmDelete: { confirmDelete($0, on: side) })
+            .frame(minWidth: 320)
+    }
+
+    /// Operation failures for each pane, then the window's own status, under the panes.
+    @ViewBuilder
+    private var messages: some View {
+        let failures = [SFTPWindowModel.Side.left, .right].compactMap { side in model.pane(side).operationMessage.map { (side, $0) } }
+        let status = model.status ?? model.openWith.message
+        if !failures.isEmpty || status != nil {
+            Divider()
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(failures, id: \.0) { side, message in
+                    Label {
+                        Text("\(paneName(side)): \(message)")
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    }
+                }
+                if let status {
+                    Text(status).foregroundStyle(.secondary)
+                }
+            }
+            .font(.caption)
+            .lineLimit(2)
+            .textSelection(.enabled)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// The pane's title, with the side when both panes show the same place.
+    private func paneName(_ side: SFTPWindowModel.Side) -> String {
+        let title = model.pane(side).title
+        guard model.left.title == model.right.title else { return title }
+        return "\(title) (\(side == .left ? "left" : "right"))"
+    }
+
+    private var isConfirmingDelete: Binding<Bool> {
+        Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } })
+    }
+
+    private func confirmDelete(_ items: [FileItem], on side: SFTPWindowModel.Side) {
+        guard !items.isEmpty else { return }
+        pendingDelete = DeleteRequest(side: side, source: model.pane(side).source, items: items)
+    }
+
+    private func delete(_ request: DeleteRequest) {
+        let pane = model.pane(request.side)
+        // The pane may have switched to another host or the Mac while the dialog was open: never delete there.
+        guard pane.source == request.source else {
+            model.status = "Nothing was deleted: the pane shows \(pane.title) now."
+            return
+        }
+        Task { await pane.delete(request.items) }
+    }
+
+    /// Closes a sheet or confirmation that was opened for a pane that has since switched to another host or the Mac.
+    private func dropRequests(for side: SFTPWindowModel.Side) {
+        if pendingDelete?.side == side { pendingDelete = nil }
+        if sheet?.side == side { sheet = nil }
     }
 
     private func transferSelection() async {
