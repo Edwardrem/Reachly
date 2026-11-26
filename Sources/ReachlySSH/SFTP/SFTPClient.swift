@@ -255,15 +255,269 @@ public final class SFTPClient: @unchecked Sendable {
 
     /// Creates an empty file at `path`. Fails if anything already exists there: never truncates or replaces.
     public func createFile(_ path: String, mode: UInt32? = nil) async throws {
-        throw SFTP.Error.protocolError("createFile is not implemented yet")
+        // CREAT|EXCL is atomic on the server and refuses an existing file, folder or symlink, even a dangling one.
+        let handle = try await createExclusively(path, mode: mode)
+        try await closeHandle(handle)
     }
 
     /// Copies a file, or a folder and everything in it, to `newPath` on the same server, streaming the bytes
     /// through this client (SFTP v3 has no server-side copy). Never overwrites: fails before writing anything when
     /// `newPath` exists. Symlinks are recreated as symlinks, not followed. Permissions are kept. Cancellable; on
     /// failure or cancellation the partial copy is removed.
+    ///
+    /// Modification times are kept too. `progress` gets the bytes copied so far and the total size of the files.
+    /// Sockets, devices and pipes inside a folder are skipped, as SFTP can't make them.
     public func copyItem(_ path: String, to newPath: String, progress: Progress? = nil) async throws {
-        throw SFTP.Error.protocolError("copyItem is not implemented yet")
+        let source = try await lstat(path)
+        if source.kind == .other {
+            throw SFTP.Error.status(.opUnsupported, "Only files, folders and symlinks can be copied", path: path)
+        }
+        if source.isDirectory, try await isSameOrInside(newPath, folder: path) {
+            throw SFTP.Error.status(.failure, "A folder can't be copied into itself", path: newPath)
+        }
+        if let clash = await existsError(at: newPath) { throw clash }
+
+        // Read the whole tree before creating anything, so an unreadable folder fails without leaving a half copy.
+        let entries = source.isDirectory ? try await copyEntries(in: path) : []
+        let total = ([source] + entries.map(\.attributes)).reduce(Int64(0)) { sum, attributes in
+            attributes.kind == .regular ? sum + Int64(clamping: attributes.size ?? 0) : sum
+        }
+        var copied: Int64 = 0
+        progress?(0, total)
+        let report: (Int64) -> Void = { bytes in
+            copied += bytes
+            progress?(copied, total)
+        }
+        try Task.checkCancellation()
+
+        // Creating `newPath` is the first write, and it is atomic (an EXCL open, mkdir or symlink): a clash that
+        // appeared since the check above fails here, and nothing that was already there is touched or removed.
+        // Everything after it lives under `newPath`, so removing `newPath` undoes it.
+        switch source.kind {
+        case .symlink:
+            let target = try await readLink(path)
+            try await creating(newPath) { try await self.symlink(target: target, at: newPath) }
+        case .regular:
+            let handle = try await createExclusively(newPath, mode: 0o600)
+            do {
+                try await fill(handle, at: newPath, from: path, attributes: source, progress: report)
+            } catch {
+                await removePartialCopy(newPath)
+                throw error
+            }
+        case .directory:
+            try await creating(newPath) { try await self.makeDirectory(newPath, mode: 0o700) }
+            do {
+                try await copyContents(entries, from: path, to: newPath, rootAttributes: source, progress: report)
+            } catch {
+                await removePartialCopy(newPath)
+                throw error
+            }
+        case .other:
+            return
+        }
+        progress?(copied, total)
+    }
+
+    // MARK: Copy helpers
+
+    /// One item below the folder being copied; parents come before their children.
+    private struct CopyEntry {
+        var relativePath: String
+        var attributes: SFTP.Attributes
+    }
+
+    private func copyEntries(in folder: String, relativeTo base: String = "") async throws -> [CopyEntry] {
+        var entries: [CopyEntry] = []
+        for entry in try await listDirectory(folder).sorted(by: { $0.name < $1.name }) {
+            try Task.checkCancellation()
+            let relative = base.isEmpty ? entry.name : base + "/" + entry.name
+            let full = SFTP.join(folder, entry.name)
+            // Servers send lstat-style attributes in a listing; ask when the type is missing.
+            let attributes = entry.attributes.permissions == nil ? try await lstat(full) : entry.attributes
+            entries.append(CopyEntry(relativePath: relative, attributes: attributes))
+            if attributes.isDirectory {
+                entries += try await copyEntries(in: full, relativeTo: relative)
+            }
+        }
+        return entries
+    }
+
+    /// Copies everything under a folder into the new, empty `newPath`. Folders stay writable while their contents
+    /// arrive; their own permissions and dates are set last, deepest first, so a read-only folder doesn't block
+    /// its children.
+    private func copyContents(_ entries: [CopyEntry], from path: String, to newPath: String, rootAttributes: SFTP.Attributes, progress: (Int64) -> Void) async throws {
+        var folders: [(path: String, attributes: SFTP.Attributes)] = [(newPath, rootAttributes)]
+        for entry in entries {
+            try Task.checkCancellation()
+            let from = SFTP.join(path, entry.relativePath)
+            let to = SFTP.join(newPath, entry.relativePath)
+            switch entry.attributes.kind {
+            case .directory:
+                try await makeDirectory(to, mode: 0o700)
+                folders.append((to, entry.attributes))
+            case .regular:
+                let handle = try await createExclusively(to, mode: 0o600)
+                try await fill(handle, at: to, from: from, attributes: entry.attributes, progress: progress)
+            case .symlink:
+                try await symlink(target: readLink(from), at: to)
+            case .other:
+                continue
+            }
+        }
+        for folder in folders.reversed() {
+            try Task.checkCancellation()
+            try await setAttributes(Self.keptAttributes(folder.attributes), path: folder.path)
+        }
+    }
+
+    /// Streams `path` into the new file open as `handle`, closes it, then gives it the source's permissions and
+    /// dates. The handle is closed on failure too.
+    private func fill(_ handle: [UInt8], at newPath: String, from path: String, attributes: SFTP.Attributes, progress: (Int64) -> Void) async throws {
+        do {
+            try await stream(path, into: handle, size: attributes.size, progress: progress)
+        } catch {
+            await closeQuietly(handle)
+            throw error
+        }
+        try await closeHandle(handle)
+        try Task.checkCancellation()
+        try await setAttributes(Self.keptAttributes(attributes), path: newPath)
+    }
+
+    /// Copies the bytes of `path` into the open `target`, `pipelineDepth` chunks of `chunkSize` at a time, so
+    /// memory stays at 512 KiB however large the file is.
+    private func stream(_ path: String, into target: [UInt8], size: UInt64?, progress: (Int64) -> Void) async throws {
+        let source = try await uncancelled { try await self.openFile(path, flags: [.read]) }
+        do {
+            let chunk = UInt64(Self.chunkSize)
+            var offset: UInt64 = 0
+            while true {
+                try Task.checkCancellation()
+                // Don't ask far past the known end; one more read there confirms it (the file may have grown).
+                var count = Self.pipelineDepth
+                if let size {
+                    let remaining = size > offset ? size - offset : 0
+                    count = Int(max(1, min(UInt64(Self.pipelineDepth), (remaining + chunk - 1) / chunk)))
+                }
+                let starts = (0..<count).map { offset + UInt64($0) * chunk }
+                let chunks = try await withThrowingTaskGroup(of: (Int, [UInt8]).self) { group -> [[UInt8]] in
+                    for (index, start) in starts.enumerated() {
+                        group.addTask { (index, try await self.read(handle: source, offset: start, length: Self.chunkSize)) }
+                    }
+                    var results = [[UInt8]](repeating: [], count: starts.count)
+                    for try await (index, bytes) in group { results[index] = bytes }
+                    return results
+                }
+                // Keep the chunks up to the first short one: a server may send less than asked before the end, so
+                // what follows a short read is read again from where it stopped.
+                var writes: [(offset: UInt64, bytes: [UInt8])] = []
+                var next = offset
+                var ended = false
+                for (start, bytes) in zip(starts, chunks) {
+                    if bytes.isEmpty {
+                        ended = true
+                        break
+                    }
+                    writes.append((start, bytes))
+                    next = start + UInt64(bytes.count)
+                    if bytes.count < Self.chunkSize { break }
+                }
+                if !writes.isEmpty {
+                    try await withThrowingTaskGroup(of: Void.self) { group in
+                        for write in writes {
+                            group.addTask { try await self.write(handle: target, offset: write.offset, data: write.bytes) }
+                        }
+                        try await group.waitForAll()
+                    }
+                    progress(Int64(next - offset))
+                }
+                if ended { break }
+                offset = next
+            }
+        } catch {
+            await closeQuietly(source)
+            throw error
+        }
+        await closeQuietly(source)
+    }
+
+    /// Opens a new file for writing with CREAT|EXCL. The request isn't abandoned halfway when the task is
+    /// cancelled, so the caller always knows whether the file was made (and so is its own to remove).
+    private func createExclusively(_ path: String, mode: UInt32?) async throws -> [UInt8] {
+        try await creating(path) {
+            try await self.openFile(path, flags: [.write, .create, .exclusive], mode: mode)
+        }
+    }
+
+    /// Runs `create` to completion even if the task is cancelled; when it fails because something is already at
+    /// `path`, says so clearly (OpenSSH only answers "Failure").
+    private func creating<T: Sendable>(_ path: String, _ create: @escaping @Sendable () async throws -> T) async throws -> T {
+        do {
+            return try await uncancelled(create)
+        } catch {
+            throw await existsError(at: path) ?? error
+        }
+    }
+
+    /// Permissions (without the file type) and dates to put on a copy.
+    private static func keptAttributes(_ attributes: SFTP.Attributes) -> SFTP.Attributes {
+        SFTP.Attributes(permissions: attributes.mode, accessTime: attributes.accessTime, modificationTime: attributes.modificationTime)
+    }
+
+    /// A clear error when something (even a dangling symlink) is at `path`, or nil.
+    private func existsError(at path: String) async -> SFTP.Error? {
+        guard (try? await uncancelled({ try await self.lstat(path) })) != nil else { return nil }
+        return .status(.failure, "An item with that name already exists", path: path)
+    }
+
+    /// True when `path` would land on `folder` or inside it, following symlinks on the way (the server resolves
+    /// both, so "/data/link/x" counts when "/data/link" points into `folder`).
+    private func isSameOrInside(_ path: String, folder: String) async throws -> Bool {
+        let resolvedFolder = (try? await realPath(folder)) ?? SFTP.normalize(folder)
+        let (parent, name) = Self.splitParent(path)
+        let resolvedParent = (try? await realPath(parent)) ?? SFTP.normalize(parent)
+        let target = SFTP.join(resolvedParent, name)
+        return resolvedFolder == "/" || target == resolvedFolder || target.hasPrefix(resolvedFolder + "/")
+    }
+
+    /// The folder holding `path` and its last component; "." for a bare name, which is relative to the session's
+    /// starting folder.
+    private static func splitParent(_ path: String) -> (parent: String, name: String) {
+        var trimmed = Substring(path)
+        while trimmed.count > 1, trimmed.hasSuffix("/") { trimmed = trimmed.dropLast() }
+        guard let slash = trimmed.lastIndex(of: "/") else { return (".", String(trimmed)) }
+        let parent = slash == trimmed.startIndex ? "/" : String(trimmed[..<slash])
+        return (parent, String(trimmed[trimmed.index(after: slash)...]))
+    }
+
+    /// Removes what a failed or cancelled copy made at `path`, even when the copy's task is cancelled. Folders are
+    /// made writable first in case their read-only permissions were already set.
+    private func removePartialCopy(_ path: String) async {
+        _ = try? await uncancelled { try await self.removeCopiedTree(path) }
+    }
+
+    private func removeCopiedTree(_ path: String) async throws {
+        let attributes = try await lstat(path)
+        guard attributes.isDirectory else {
+            try await remove(path)
+            return
+        }
+        try? await setPermissions(0o700, path: path)
+        for entry in try await listDirectory(path) {
+            try? await removeCopiedTree(SFTP.join(path, entry.name))
+        }
+        try await removeDirectory(path)
+    }
+
+    private func closeQuietly(_ handle: [UInt8]) async {
+        _ = try? await uncancelled { try await self.closeHandle(handle) }
+    }
+
+    /// Runs `body` in a task of its own, so its requests go out and wait for their replies even when the calling
+    /// task has been cancelled.
+    private func uncancelled<T: Sendable>(_ body: @escaping @Sendable () async throws -> T) async throws -> T {
+        try await Task { try await body() }.value
     }
 
     // MARK: Files
