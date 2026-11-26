@@ -56,6 +56,21 @@ enum PaneSource: Equatable, Hashable {
         if case .remote(let id) = self { return id }
         return nil
     }
+
+    /// The same side as `PastePlan` names it.
+    var fileSide: FileSide {
+        switch self {
+        case .local: .local
+        case .remote(let hostID): .remote(hostID: hostID)
+        }
+    }
+
+    init(_ side: FileSide) {
+        switch side {
+        case .local: self = .local
+        case .remote(let hostID): self = .remote(hostID: hostID)
+        }
+    }
 }
 
 /// The operations a pane needs from either side.
@@ -66,6 +81,10 @@ protocol FileSystemBackend: AnyObject {
     func homePath() async throws -> String
     func list(_ path: String) async throws -> [FileItem]
     func makeDirectory(_ path: String) async throws
+    /// Creates an empty file; fails when anything already exists at `path`.
+    func createFile(_ path: String) async throws
+    /// Copies a file or folder; fails when anything already exists at `newPath`.
+    func copy(_ path: String, to newPath: String) async throws
     func delete(_ item: FileItem) async throws
     func rename(_ path: String, to newPath: String) async throws
     func setMode(_ mode: UInt32, path: String) async throws
@@ -108,6 +127,20 @@ final class LocalBackend: FileSystemBackend {
 
     func makeDirectory(_ path: String) async throws {
         try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: false)
+    }
+
+    func createFile(_ path: String) async throws {
+        // O_EXCL makes the existence check and the create one step. FileManager.createFile would replace a file.
+        let descriptor = Darwin.open(path, O_WRONLY | O_CREAT | O_EXCL, 0o644)
+        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        Darwin.close(descriptor)
+    }
+
+    func copy(_ path: String, to newPath: String) async throws {
+        // copyItem refuses an existing target. Off the main thread: a large folder takes a while.
+        try await Task.detached(priority: .userInitiated) {
+            try FileManager.default.copyItem(atPath: path, toPath: newPath)
+        }.value
     }
 
     func delete(_ item: FileItem) async throws {
@@ -235,6 +268,14 @@ final class RemoteBackend: FileSystemBackend {
         try await client().makeDirectory(path)
     }
 
+    func createFile(_ path: String) async throws {
+        try await client().createFile(path)
+    }
+
+    func copy(_ path: String, to newPath: String) async throws {
+        try await client().copyItem(path, to: newPath)
+    }
+
     func delete(_ item: FileItem) async throws {
         let client = try await client()
         if item.isDirectory, !item.isSymlink {
@@ -255,22 +296,25 @@ final class RemoteBackend: FileSystemBackend {
     func join(_ base: String, _ component: String) -> String { SFTP.join(base, component) }
     func parent(_ path: String) -> String { SFTP.parent(path) }
 
-    /// Every file under `path`, with paths relative to it, for folder downloads.
-    func walk(_ path: String) async throws -> [(relative: String, item: FileItem)] {
-        var out: [(String, FileItem)] = []
+    /// Every folder and file under `path`, with paths relative to it, for folder downloads. Folders come before
+    /// what is in them, so empty ones can be recreated too.
+    func walk(_ path: String) async throws -> (directories: [String], files: [(relative: String, item: FileItem)]) {
+        var directories: [String] = []
+        var files: [(String, FileItem)] = []
         func visit(_ directory: String, prefix: String) async throws {
             for item in try await list(directory) {
                 try Task.checkCancellation()
                 let relative = prefix.isEmpty ? item.name : prefix + "/" + item.name
                 if item.isDirectory {
+                    directories.append(relative)
                     try await visit(item.path, prefix: relative)
                 } else {
-                    out.append((relative, item))
+                    files.append((relative, item))
                 }
             }
         }
         try await visit(path, prefix: "")
-        return out
+        return (directories, files)
     }
 }
 
@@ -465,15 +509,34 @@ final class PaneModel: Identifiable {
 
     // MARK: Operations
 
-    /// Selects `paths`. While a load is in flight the selection is kept as is and that load trims it.
+    /// Selects those of `paths` the pane shows, and leaves the selection alone when it shows none of them. While a
+    /// load is in flight all of `paths` are selected and that load trims them.
     func select(_ paths: [String]) {
-        let wanted = Set(paths)
-        selection = pending == nil ? wanted.filter { id in items.contains { $0.path == id } } : wanted
+        guard pending == nil else {
+            selection = Set(paths)
+            return
+        }
+        let shown = Set(paths).filter { id in items.contains { $0.path == id } }
+        if !shown.isEmpty { selection = shown }
+    }
+
+    /// Where a new item called `name` goes in the current folder, or nil (with `operationMessage` set) when the name
+    /// can't be used or is already taken here. The create itself still refuses a clash.
+    private func pathForNewItem(named name: String) -> String? {
+        if let problem = FileNaming.validationError(for: name) {
+            operationMessage = problem
+            return nil
+        }
+        if items.contains(where: { $0.name == name }) {
+            operationMessage = "There's already an item named “\(name)” here."
+            return nil
+        }
+        return backend.join(path, name)
     }
 
     func makeDirectory(named name: String) async {
+        guard let target = pathForNewItem(named: name) else { return }
         let backend = backend
-        let target = backend.join(path, name)
         do {
             try await backend.makeDirectory(target)
             operationMessage = nil
@@ -489,8 +552,16 @@ final class PaneModel: Identifiable {
             operationMessage = nil
             return
         }
+        if let problem = FileNaming.validationError(for: name) {
+            operationMessage = problem
+            return
+        }
         let backend = backend
         let folder = backend.parent(item.path)
+        if folder == path, items.contains(where: { $0.name == name }) {
+            operationMessage = "There's already an item named “\(name)” here."
+            return
+        }
         let target = backend.join(folder, name)
         do {
             try await backend.rename(item.path, to: target)
@@ -581,17 +652,95 @@ final class PaneModel: Identifiable {
 
     /// Creates an empty file called `name` in the current folder, then selects it.
     func createFile(named name: String) async {
-        operationMessage = "New File is not available yet."
+        guard let target = pathForNewItem(named: name) else { return }
+        let backend = backend
+        do {
+            try await backend.createFile(target)
+            operationMessage = nil
+        } catch {
+            operationMessage = "Could not create “\(name)”: \(Self.describe(error))"
+            return
+        }
+        await finishOperation(changing: [backend.parent(target)], on: backend, select: [target])
     }
 
     /// Copies each item next to itself, named with `FileNaming.copyName`.
     func duplicate(_ items: [FileItem]) async {
-        operationMessage = "Duplicate is not available yet."
+        guard !items.isEmpty else { return }
+        let backend = backend
+        var namesByFolder: [String: Set<String>] = [:]
+        var copies: [String] = []
+        var failures: [Failure] = []
+        for item in items {
+            let folder = backend.parent(item.path)
+            if namesByFolder[folder] == nil {
+                let listed = (try? await backend.list(folder)) ?? (folder == path ? self.items : [])
+                namesByFolder[folder] = Set(listed.map(\.name))
+            }
+            let name = FileNaming.copyName(for: item.name, isDirectory: item.isDirectory, existing: namesByFolder[folder] ?? [])
+            namesByFolder[folder, default: []].insert(name)
+            if let problem = FileNaming.validationError(for: name) {
+                failures.append(Failure(name: item.name, reason: problem))
+                continue
+            }
+            let target = backend.join(folder, name)
+            do {
+                try await backend.copy(item.path, to: target)
+                copies.append(target)
+            } catch {
+                failures.append(Failure(name: item.name, error: error))
+            }
+        }
+        report(failures, verb: "duplicate", of: items.count)
+        await finishOperation(changing: Set(namesByFolder.keys), on: backend, select: copies)
     }
 
     /// Moves the items into `directory` on the same side: an absolute path, or one relative to the current folder.
     func move(_ items: [FileItem], toDirectory directory: String) async {
-        operationMessage = "Move is not available yet."
+        guard !items.isEmpty else { return }
+        let backend = backend
+        let destination = resolvedDirectory(directory)
+        var names: Set<String>
+        do {
+            names = Set(try await backend.list(destination).map(\.name))
+        } catch {
+            operationMessage = "Could not open “\(directory)”: \(Self.describe(error))"
+            return
+        }
+        var moved: [String] = []
+        var failures: [Failure] = []
+        var folders: Set<String> = [destination]
+        for item in items {
+            let folder = backend.parent(item.path)
+            if let problem = FileNaming.validationError(for: item.name) {
+                failures.append(Failure(name: item.name, reason: problem))
+            } else if folder == destination {
+                failures.append(Failure(name: item.name, reason: "It's already in that folder."))
+            } else if item.isDirectory, destination == item.path || destination.hasPrefix(item.path + "/") {
+                failures.append(Failure(name: item.name, reason: "A folder can't go inside itself."))
+            } else if names.contains(item.name) {
+                failures.append(Failure(name: item.name, reason: "There's already an item with that name in “\(SFTP.baseName(destination))”."))
+            } else {
+                let target = backend.join(destination, item.name)
+                do {
+                    // A plain rename: it fails rather than replace anything already at `target`.
+                    try await backend.rename(item.path, to: target)
+                    names.insert(item.name)
+                    moved.append(target)
+                    folders.insert(folder)
+                } catch {
+                    failures.append(Failure(name: item.name, error: error))
+                }
+            }
+        }
+        report(failures, verb: "move", of: items.count)
+        await finishOperation(changing: folders, on: backend, select: moved)
+    }
+
+    /// `directory` as a clean absolute path: a relative one starts at the current folder; `~` works on the Mac.
+    private func resolvedDirectory(_ directory: String) -> String {
+        let expanded = source == .local ? (directory as NSString).expandingTildeInPath : directory
+        return SFTP.normalize(backend.join(path, expanded))
     }
 }
 
