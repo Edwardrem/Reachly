@@ -28,7 +28,8 @@ struct ApprovalFeedbackTests {
         #expect(host.approvalRequests.map(\.command) == ["journalctl --no-pager"])
         #expect(host.executed.isEmpty)
         #expect(!result.isError)
-        #expect(result.content.hasPrefix("The user did not run this command and wants changes before anything runs on web-01."))
+        #expect(AgentToolRunner.changesRequestedPrefix == "The user did not run this command and wants changes")
+        #expect(result.content.hasPrefix(AgentToolRunner.changesRequestedPrefix + " before anything runs on web-01."))
         #expect(result.content.contains("<user_comment>\nOnly the nginx unit,\nand just the last hour.\n</user_comment>"))
         #expect(!result.content.contains("<suggested_command>"))
         #expect(result.content.contains("call run_command again"))
@@ -194,6 +195,122 @@ struct ApprovalFeedbackTests {
         // Other decisions never show a comment line, whatever their detail says.
         let denied = AgentAuditEntry(source: .agentPanel, hostID: nil, hostName: "web-01", hostTarget: "me@host", tool: "run_command", command: "true", reason: "", decision: .denied, decisionDetail: detail)
         #expect(denied.changesRequestedComment == nil)
+    }
+
+    @Test func heredocCommentLineDoesNotFoolTheAuditRow() async throws {
+        let heredoc = "cat > /etc/motd <<'EOF'\nComment: maintenance tonight\nEOF"
+        let host = FakeToolHost(hosts: [FakeToolHost.web])
+        host.approval = { _ in .requestChanges(comment: "Keep the old banner.", editedCommand: heredoc) }
+        let runner = AgentToolRunner(host: host, source: .agentPanel)
+
+        let result = await runCommand(runner, "rm /etc/motd")
+
+        #expect(result.content.contains("<suggested_command>\n" + heredoc + "\n</suggested_command>"))
+        let record = try #require(host.auditRecords.first)
+        #expect(record.decisionDetail.contains("Suggested command: cat > /etc/motd <<'EOF'\n  Comment: maintenance tonight\n  EOF\nComment: Keep the old banner."))
+        #expect(AgentAuditDecision.changesRequestedComment(in: record.decisionDetail) == "Keep the old banner.")
+        let entry = AgentAuditEntry(source: record.source, hostID: record.hostID, hostName: record.hostName, hostTarget: record.hostTarget, tool: record.tool, command: record.command, reason: record.reason, decision: record.decision, decisionDetail: record.decisionDetail)
+        #expect(entry.changesRequestedComment == "Keep the old banner.")
+
+        // CRLF line endings, a guardrail that spans lines or starts like a
+        // comment, and a comment that itself mentions "Comment: " all round-trip.
+        let crlf = "cat > /etc/motd <<'EOF'\r\nComment: tonight\r\nEOF"
+        #expect(AgentAuditDecision.changesRequestedComment(in: AgentAuditDecision.changesRequestedDetail(guardrail: "", comment: "No.", suggestion: crlf)) == "No.")
+        let guardrail = "Comment: odd guardrail\nComment: second line"
+        #expect(AgentAuditDecision.changesRequestedComment(in: AgentAuditDecision.changesRequestedDetail(guardrail: guardrail, comment: "Fine.", suggestion: nil)) == "Fine.")
+        let comment = "Two things.\nComment: keep this line too."
+        #expect(AgentAuditDecision.changesRequestedComment(in: AgentAuditDecision.changesRequestedDetail(guardrail: "Ask.", comment: comment, suggestion: heredoc)) == comment)
+    }
+
+    @Test func otherToolsSendTheCommentAlone() async throws {
+        let temp = FileManager.default.temporaryDirectory.appending(path: "reachly-feedback-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let upload = temp.appending(path: "site.tar.gz")
+        try Data("payload".utf8).write(to: upload)
+
+        let host = FakeToolHost(hosts: [FakeToolHost.web])
+        host.approval = { _ in .requestChanges(comment: "Upload it to /srv/releases instead.", editedCommand: "cat > /srv/releases/site.tar.gz") }
+        let runner = AgentToolRunner(host: host, source: .mcp)
+
+        let transfer = await runner.call(name: AgentToolName.sftpTransfer.rawValue, input: ["host": "web-01", "direction": "upload", "remote_path": "/tmp/site.tar.gz", "local_path": .string(upload.path), "reason": "deploy"])
+        let write = await runner.call(name: AgentToolName.writeFile.rawValue, input: ["host": "web-01", "path": "/etc/motd", "contents": "hello", "reason": "banner"])
+
+        #expect(host.approvalRequests.map(\.isCommandEditable) == [false, false])
+        #expect(host.executed.isEmpty)
+        for (result, tool) in [(transfer, "sftp_transfer"), (write, "write_file")] {
+            #expect(!result.isError)
+            #expect(result.content.hasPrefix(AgentToolRunner.changesRequestedPrefix))
+            #expect(result.content.contains("<user_comment>\nUpload it to /srv/releases instead.\n</user_comment>"))
+            #expect(!result.content.contains("<suggested_command>"))
+            #expect(!result.content.contains("cat > /srv/releases"))
+            #expect(result.content.contains("Adjust the \(tool) arguments to follow their comment and call \(tool) again"))
+            #expect(!result.content.contains("run_command"))
+        }
+        #expect(host.auditRecords.map(\.decision) == [.changesRequested, .changesRequested])
+        #expect(host.auditRecords.allSatisfy { !$0.decisionDetail.contains("Suggested command") })
+
+        // The sheet builds the same answer, so its hint never promises the edit.
+        #expect(AgentApprovalResponse.changeRequest(comment: "x", command: "cat > /srv/a", proposed: "cat > /tmp/a", includingEdit: false)?.suggestedCommand == nil)
+        #expect(AgentApprovalResponse.changeRequest(comment: "x", command: "df -h /", proposed: "df -h")?.suggestedCommand == "df -h /")
+        // A whitespace-only edit is no edit: nothing to send, nothing to mention.
+        #expect(AgentApprovalResponse.changeRequest(comment: "x", command: "df -h \n", proposed: "df -h")?.suggestedCommand == nil)
+        #expect(AgentApprovalResponse.approved.suggestedCommand == nil)
+    }
+
+    @Test func onlyRunCommandIsEditable() {
+        for tool in AgentToolName.allCases {
+            let request = AgentApprovalRequest(source: .agentPanel, host: FakeToolHost.web, tool: tool.rawValue, command: "x", reason: "", detail: "", isDestructive: false)
+            #expect(request.isCommandEditable == (tool == .runCommand), "\(tool.rawValue)")
+        }
+    }
+
+    @Test func editsToStandInLinesRunNothing() async throws {
+        let temp = FileManager.default.temporaryDirectory.appending(path: "reachly-edit-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let upload = temp.appending(path: "site.tar.gz")
+        try Data("payload".utf8).write(to: upload)
+
+        let host = FakeToolHost(hosts: [FakeToolHost.web])
+        host.approval = { _ in .edited("cat > /srv/elsewhere") }
+        let runner = AgentToolRunner(host: host, source: .agentPanel)
+
+        let calls: [(AgentToolName, JSONValue)] = [
+            (.writeFile, ["host": "web-01", "path": "/etc/motd", "contents": "hello", "reason": "banner"]),
+            (.sftpTransfer, ["host": "web-01", "direction": "upload", "remote_path": "/tmp/site.tar.gz", "local_path": .string(upload.path), "reason": "deploy"]),
+            (.sftpTransfer, ["host": "web-01", "direction": "download", "remote_path": "/etc/hosts", "local_path": .string(temp.appending(path: "hosts").path), "reason": "copy"]),
+            (.readFile, ["host": "web-01", "path": "/etc/hosts"]),
+        ]
+        for (tool, input) in calls {
+            let result = await runner.call(name: tool.rawValue, input: input)
+            #expect(result.isError, "\(tool.rawValue)")
+            #expect(result.content == "The user's edit can't be applied to \(tool.rawValue); nothing ran.")
+        }
+
+        #expect(host.approvalRequests.count == calls.count)
+        #expect(host.executed.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: temp.appending(path: "hosts").path))
+        #expect(host.auditRecords.map(\.decision) == Array(repeating: .denied, count: calls.count))
+        #expect(!host.auditRecords.contains { $0.decision == .edited || $0.decision.ran })
+        #expect(host.auditRecords.map(\.decisionDetail) == calls.map { "The user's edit can't be applied to \($0.0.rawValue); nothing ran." })
+        #expect(host.auditRecords.allSatisfy { $0.proposedCommand == nil && !$0.command.contains("/srv/elsewhere") })
+    }
+
+    @Test func runCommandEditsStillRunTheEditedText() async throws {
+        let host = FakeToolHost(hosts: [FakeToolHost.web])
+        host.approval = { _ in .edited("  df -h /srv\n") }
+        let runner = AgentToolRunner(host: host, source: .mcp)
+
+        let result = await runCommand(runner, "df -h")
+
+        #expect(!result.isError)
+        #expect(result.content.contains("ran: df -h /srv"))
+        #expect(host.executed.map(\.command) == ["df -h /srv"])
+        let record = try #require(host.auditRecords.first)
+        #expect(host.auditRecords.map(\.decision) == [.edited])
+        #expect(record.command == "df -h /srv")
+        #expect(record.proposedCommand == "df -h")
     }
 
     @Test func systemPromptExplainsComments() {

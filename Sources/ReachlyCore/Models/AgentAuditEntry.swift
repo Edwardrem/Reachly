@@ -47,28 +47,39 @@ public enum AgentAuditDecision: String, Codable, Sendable, CaseIterable {
     private static let commentMarker = "Comment: "
 
     /// The decision detail for `.changesRequested`: the guardrail reason, the
-    /// suggested command when there is one, and the comment last, since it can
-    /// span lines.
+    /// suggested command when there is one, and the comment last (as typed, to
+    /// the end). Every line before the comment that does not start a field is
+    /// indented by two spaces, so the only line that starts with `Comment: ` is
+    /// the comment's own, even when a suggested heredoc contains one.
     public static func changesRequestedDetail(guardrail: String, comment: String, suggestion: String?) -> String {
-        var lines: [String] = []
-        if !guardrail.isEmpty { lines.append(guardrail) }
-        if let suggestion { lines.append("Suggested command: \(suggestion)") }
+        var fields: [String] = []
+        if !guardrail.isEmpty { fields.append(guardrail) }
+        if let suggestion { fields.append("Suggested command: \(suggestion)") }
+        var lines = fields.flatMap { field in
+            splitLines(field).enumerated().map { index, line in
+                index == 0 && !startsWithMarker(line) ? line : "  " + line
+            }
+        }
         lines.append(commentMarker + comment)
         return lines.joined(separator: "\n")
     }
 
     /// The comment inside a `changesRequestedDetail`, or nil when there is none.
     public static func changesRequestedComment(in detail: String) -> String? {
-        let start: String.Index
-        if detail.hasPrefix(commentMarker) {
-            start = detail.index(detail.startIndex, offsetBy: commentMarker.count)
-        } else if let range = detail.range(of: "\n" + commentMarker) {
-            start = range.upperBound
-        } else {
-            return nil
-        }
-        let comment = detail[start...].trimmingCharacters(in: .whitespacesAndNewlines)
+        let lines = splitLines(detail)
+        guard let index = lines.firstIndex(where: startsWithMarker) else { return nil }
+        let first = String(lines[index].unicodeScalars.dropFirst(commentMarker.unicodeScalars.count))
+        let comment = ([first] + lines[(index + 1)...]).joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
         return comment.isEmpty ? nil : comment
+    }
+
+    /// Split at every "\n" code unit, CRLF included, so a split and a join round-trip.
+    private static func splitLines(_ text: String) -> [String] {
+        text.components(separatedBy: "\n")
+    }
+
+    private static func startsWithMarker(_ line: String) -> Bool {
+        line.unicodeScalars.starts(with: commentMarker.unicodeScalars)
     }
 }
 

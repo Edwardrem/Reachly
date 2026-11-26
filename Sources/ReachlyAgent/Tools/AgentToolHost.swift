@@ -61,11 +61,20 @@ public struct AgentApprovalRequest: Sendable, Identifiable {
         self.detail = detail
         self.isDestructive = isDestructive
     }
+
+    /// Whether the user can edit `command`. Only run_command's text is the
+    /// tool's real input. The other tools show a stand-in line (`cat > path  #
+    /// upload 12 bytes from …`): editing it would not change what runs, and
+    /// passing it back could lead the model to run it as a command. So for them
+    /// the sheet shows it read-only, offers no Run Edited Command, sends a
+    /// comment alone, and the runner refuses an `.edited` answer.
+    public var isCommandEditable: Bool { tool == AgentToolName.runCommand.rawValue }
 }
 
 public enum AgentApprovalResponse: Sendable, Equatable {
     case approved
-    /// The user changed the command; the new text runs instead.
+    /// The user changed the command; the new text runs instead. Only for
+    /// requests whose command is editable (`isCommandEditable`).
     case edited(String)
     /// The user wants changes before anything runs. Nothing runs: the model
     /// gets the comment (and the edited command as a suggestion, when there is
@@ -85,11 +94,18 @@ public enum AgentApprovalResponse: Sendable, Equatable {
     }
 
     /// The sheet's Send answer for a comment and the command as it stands in
-    /// the editor. The edit is kept only when it differs from the proposal and
-    /// is not empty. Nil when the comment is empty.
-    public static func changeRequest(comment: String, command: String, proposed: String) -> AgentApprovalResponse? {
+    /// the editor. The edit is kept only when `includingEdit` (see
+    /// `AgentApprovalRequest.isCommandEditable`) and it differs from the
+    /// proposal by more than surrounding whitespace. Nil when the comment is empty.
+    public static func changeRequest(comment: String, command: String, proposed: String, includingEdit: Bool = true) -> AgentApprovalResponse? {
         guard let comment = normalizedComment(comment) else { return nil }
-        return .requestChanges(comment: comment, editedCommand: suggestion(command, proposed: proposed))
+        return .requestChanges(comment: comment, editedCommand: includingEdit ? suggestion(command, proposed: proposed) : nil)
+    }
+
+    /// The edited command this answer passes back to the model, if any.
+    public var suggestedCommand: String? {
+        if case .requestChanges(_, let edited) = self { return edited }
+        return nil
     }
 
     /// The edited command worth passing back, or nil when it is empty or unchanged.
