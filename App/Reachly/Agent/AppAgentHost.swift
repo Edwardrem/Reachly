@@ -34,6 +34,35 @@ final class AgentApprovalPrompt: Identifiable {
     }
 }
 
+/// An external agent (Qoder over ACP) asking to use one of its own tools on this Mac, not answered yet.
+/// Shown as a sheet by `ContentView`, in the same queue as command approvals.
+@MainActor
+final class AgentPermissionPrompt: Identifiable {
+    let id: UUID
+    let request: AgentPermissionRequest
+    private var continuation: CheckedContinuation<AgentPermissionDecision, Never>?
+    private var onResume: ((AgentPermissionPrompt) -> Void)?
+
+    init(request: AgentPermissionRequest) {
+        id = request.id
+        self.request = request
+    }
+
+    fileprivate func arm(_ continuation: CheckedContinuation<AgentPermissionDecision, Never>, onResume: @escaping (AgentPermissionPrompt) -> Void) {
+        self.continuation = continuation
+        self.onResume = onResume
+    }
+
+    /// Answers the request. Later calls do nothing, so a stopped turn and the user's click can race safely.
+    func resume(_ decision: AgentPermissionDecision) {
+        guard let continuation else { return }
+        self.continuation = nil
+        continuation.resume(returning: decision)
+        onResume?(self)
+        onResume = nil
+    }
+}
+
 /// Connects the agent tools to the app: saved hosts from SwiftData, commands
 /// through the workspace's agent log tabs, approvals through a sheet, and the
 /// audit log in the database.
@@ -96,6 +125,22 @@ final class AppAgentHost: AgentToolHost {
             }
         } onCancel: {
             Task { @MainActor in prompt.resume(.denied) }
+        }
+    }
+
+    /// Asks the user whether the external agent may use one of its own tools. Closing the sheet rejects it;
+    /// a stopped turn answers `.cancelled`. Nothing is allowed without a click on one of the agent's options.
+    func askPermission(_ request: AgentPermissionRequest) async -> AgentPermissionDecision {
+        let prompt = AgentPermissionPrompt(request: request)
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                prompt.arm(continuation) { [appState] finished in
+                    appState.pendingAgentPermissions.removeAll { $0.id == finished.id }
+                }
+                appState.pendingAgentPermissions.append(prompt)
+            }
+        } onCancel: {
+            Task { @MainActor in prompt.resume(.cancelled) }
         }
     }
 

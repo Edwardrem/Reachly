@@ -137,9 +137,12 @@ public struct ReachlyAIState: Sendable, Equatable {
     public var bridgePath: String
     public var mcpServerEnabled: Bool
     public var mcpPort: Int
+    /// The agent the chat panel runs over ACP (the Qoder CLI), when one is chosen.
+    public var acpCommandPath: String?
 
-    public init(kind: LLMProviderConfiguration.Kind, hasKey: Bool, savedKeyOrigin: EndpointOrigin? = nil, baseURL: String = "", model: String = "", bridgePath: String, mcpServerEnabled: Bool, mcpPort: Int = MCPBridgeConfig.defaultPort) {
+    public init(kind: LLMProviderConfiguration.Kind, hasKey: Bool, savedKeyOrigin: EndpointOrigin? = nil, baseURL: String = "", model: String = "", bridgePath: String, mcpServerEnabled: Bool, mcpPort: Int = MCPBridgeConfig.defaultPort, acpCommandPath: String? = nil) {
         self.kind = kind
+        self.acpCommandPath = acpCommandPath
         self.hasKey = hasKey
         self.savedKeyOrigin = savedKeyOrigin
         self.baseURL = baseURL
@@ -150,7 +153,7 @@ public struct ReachlyAIState: Sendable, Equatable {
     }
 
     public init(configuration: LLMProviderConfiguration, hasKey: Bool, savedKeyOrigin: EndpointOrigin?, bridgePath: String, mcpServerEnabled: Bool, mcpPort: Int) {
-        self.init(kind: configuration.kind, hasKey: hasKey, savedKeyOrigin: savedKeyOrigin, baseURL: configuration.baseURL, model: configuration.model, bridgePath: bridgePath, mcpServerEnabled: mcpServerEnabled, mcpPort: mcpPort)
+        self.init(kind: configuration.kind, hasKey: hasKey, savedKeyOrigin: savedKeyOrigin, baseURL: configuration.baseURL, model: configuration.model, bridgePath: bridgePath, mcpServerEnabled: mcpServerEnabled, mcpPort: mcpPort, acpCommandPath: configuration.acpCommandPath)
     }
 
     /// A key is saved and will be sent: Anthropic and Caimex always, an endpoint only at the origin it was saved for.
@@ -188,6 +191,9 @@ public enum AIProviderReadiness {
         case .openAICompatible:
             guard let url = URL(string: configuration.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)) else { return false }
             return url.scheme != nil && url.host != nil
+        case .qoder:
+            // The CLI confirmed in AI Integration. Whether it is signed in shows on the first message.
+            return !(configuration.acpCommandPath ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
     }
 

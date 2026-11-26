@@ -22,6 +22,15 @@ public final class AgentSession {
     public private(set) var usage = LLMUsage()
 
     public var provider: any LLMProvider
+    /// Set when an agent that runs its own loop answers, such as Qoder over ACP. Turns then go to it instead of
+    /// `provider`, `systemPrompt` is the context it gets at the start of a session, and Reachly's tool runner
+    /// does not run its tools: it reaches the servers through Reachly's MCP server, under the same guardrails.
+    public var externalAgent: (any ExternalAgent)?
+    /// The finished part of an external agent's reply in progress, in the order it came: text, reasoning, tool
+    /// calls, plans and notices. `streamingThinking` and `streamingText` are the part still coming in.
+    public private(set) var streamingBlocks: [AgentContentBlock] = []
+    /// The ACP message the streaming text belongs to; a chunk with another id starts a new block.
+    private var streamingMessageID: String?
     public var systemPrompt: String
     public let toolRunner: AgentToolRunner
     public var tools: [AgentToolDefinition] = AgentTools.all
@@ -54,7 +63,7 @@ public final class AgentSession {
     /// await (building a provider can wait on Touch ID) can pass the token it
     /// started with and change nothing if another conversation is shown by then.
     public struct ConversationToken: Hashable, Sendable {
-        fileprivate let id = UUID()
+        public let id = UUID()
     }
 
     public private(set) var conversationToken = ConversationToken()
@@ -153,6 +162,7 @@ public final class AgentSession {
     public func clear() {
         guard !isRunning else { return }
         messages = []
+        externalAgent?.forgetSession(for: externalConversationKey)
         lastError = nil
         transcriptDidChange?()
     }
@@ -170,6 +180,8 @@ public final class AgentSession {
             isRunning = false
             streamingText = ""
             streamingThinking = ""
+            streamingBlocks = []
+            streamingMessageID = nil
             activeTool = nil
             task = nil
         }
@@ -188,6 +200,8 @@ public final class AgentSession {
         messages.removeSubrange(index...)
         // Cutting at any id can leave a reply with unanswered calls at the end.
         messages = AgentTranscript.healed(messages)
+        // An external agent's session still holds what was cut.
+        externalAgent?.forgetSession(for: externalConversationKey)
         lastError = nil
         transcriptDidChange?()
         return message
@@ -214,6 +228,8 @@ public final class AgentSession {
         isRunning = false
         streamingText = ""
         streamingThinking = ""
+        streamingBlocks = []
+        streamingMessageID = nil
         activeTool = nil
         task = nil
     }
@@ -227,9 +243,10 @@ public final class AgentSession {
         transcriptDidChange?()
     }
 
-    /// What has streamed of the reply in progress: its reasoning, then its text.
+    /// What has streamed of the reply in progress: an external agent's finished blocks, then the reasoning and
+    /// text still coming in.
     private var partialBlocks: [AgentContentBlock] {
-        var blocks: [AgentContentBlock] = []
+        var blocks = streamingBlocks
         if !streamingThinking.isEmpty { blocks.append(.thinking(text: streamingThinking, signature: nil)) }
         if !streamingText.isEmpty { blocks.append(.text(streamingText)) }
         return blocks
@@ -258,6 +275,10 @@ public final class AgentSession {
     private static let stoppedText = "Stopped."
 
     private func run(generation: Int) async {
+        if let externalAgent {
+            await runExternal(externalAgent, generation: generation)
+            return
+        }
         for _ in 0..<maxToolRounds {
             guard isCurrent(generation) else { return }
             streamingText = ""
@@ -355,6 +376,127 @@ public final class AgentSession {
         }
         guard isCurrent(generation) else { return }
         fail(.toolRounds, "Stopped after \(maxToolRounds) rounds of tool calls. Send a message to continue.")
+    }
+
+    // MARK: External agent
+
+    /// The conversation as an external agent knows it: the saved conversation's id, or, before it is saved,
+    /// this session's hold on it.
+    public var externalConversationKey: String {
+        toolRunner.conversationID?.uuidString ?? "unsaved-\(conversationToken.id.uuidString)"
+    }
+
+    /// One turn of an external agent: the latest user message goes to it, and what it reports streams into the
+    /// reply in progress, which becomes one assistant message when the turn ends. A stop, an error or the agent
+    /// going away leaves a failure row, as a model's reply does.
+    private func runExternal(_ agent: any ExternalAgent, generation: Int) async {
+        resetStreaming()
+        guard let index = messages.lastIndex(where: { $0.role == .user && $0.failure == nil }) else { return }
+        let message = messages[index]
+        let earlier = messages[..<index].contains { $0.role == .user && $0.failure == nil && (!$0.text.isEmpty || !$0.attachments.isEmpty) }
+        let turn = ExternalAgentTurn(
+            conversationKey: externalConversationKey,
+            message: message,
+            context: systemPrompt,
+            hasEarlierTurns: earlier)
+        let stop: ExternalAgentStopReason
+        do {
+            stop = try await agent.run(turn) { [weak self] event in
+                guard let self, self.isCurrent(generation) else { return }
+                self.apply(event)
+            }
+        } catch is CancellationError {
+            guard isCurrent(generation) else { return }
+            stopped()
+            return
+        } catch {
+            guard isCurrent(generation) else { return }
+            if Task.isCancelled {
+                stopped()
+            } else {
+                // What the agent did before it failed stays in view, in the row.
+                fail((error as? ExternalAgentFailure)?.kind ?? .error, error.localizedDescription, keepingPartial: true)
+            }
+            return
+        }
+        guard isCurrent(generation) else { return }
+        if stop == .cancelled {
+            stopped()
+            return
+        }
+        let reply = partialBlocks
+        resetStreaming()
+        append(AgentMessage(role: .assistant, blocks: reply.isEmpty ? [.notice("\(agent.name) finished without a reply.")] : reply, model: lastModel))
+        switch stop {
+        case .endTurn, .cancelled:
+            break
+        case .maxTokens:
+            fail(.cutOff, "\(agent.name) stopped at its model's output limit. Send \"continue\" to go on.")
+        case .maxTurnRequests:
+            fail(.toolRounds, "\(agent.name) reached its limit of model requests for one message. Send a message to continue.")
+        case .refusal:
+            fail(.refusal, "\(agent.name) declined to continue.")
+        }
+    }
+
+    private func resetStreaming() {
+        streamingText = ""
+        streamingThinking = ""
+        streamingBlocks = []
+        streamingMessageID = nil
+        activeTool = nil
+    }
+
+    /// Moves the reasoning and text still coming in into `streamingBlocks`, so what comes next starts a new block.
+    private func flushStreaming() {
+        if !streamingThinking.isEmpty { streamingBlocks.append(.thinking(text: streamingThinking, signature: nil)) }
+        if !streamingText.isEmpty { streamingBlocks.append(.text(streamingText)) }
+        streamingThinking = ""
+        streamingText = ""
+    }
+
+    /// Takes one event of an external agent's turn into the reply in progress.
+    private func apply(_ event: ExternalAgentEvent) {
+        switch event {
+        case .started(let agent):
+            lastModel = agent ?? externalAgent?.name
+        case .notice(let text):
+            flushStreaming()
+            streamingBlocks.append(.notice(text))
+        case .text(let piece, let messageID):
+            startsNewMessage(messageID)
+            streamingText += piece
+        case .thinking(let piece, let messageID):
+            startsNewMessage(messageID)
+            // Reasoning after text belongs below it, in a block of its own.
+            if !streamingText.isEmpty { flushStreaming() }
+            streamingThinking += piece
+        case .toolCall(let call):
+            if let index = streamingBlocks.firstIndex(where: { if case .agentToolCall(let existing) = $0 { existing.id == call.id } else { false } }) {
+                streamingBlocks[index] = .agentToolCall(call)
+            } else {
+                flushStreaming()
+                streamingBlocks.append(.agentToolCall(call))
+            }
+            activeTool = streamingBlocks.reversed().lazy.compactMap { block -> String? in
+                if case .agentToolCall(let call) = block, !call.status.isFinished { return call.title }
+                return nil
+            }.first
+        case .plan(let entries):
+            // One plan per reply, kept where it first appeared and replaced by each update.
+            if let index = streamingBlocks.firstIndex(where: { if case .plan = $0 { true } else { false } }) {
+                streamingBlocks[index] = .plan(entries)
+            } else {
+                flushStreaming()
+                streamingBlocks.append(.plan(entries))
+            }
+        }
+    }
+
+    private func startsNewMessage(_ messageID: String?) {
+        guard let messageID else { return }
+        if let current = streamingMessageID, current != messageID { flushStreaming() }
+        streamingMessageID = messageID
     }
 
     private func streamOnce(generation: Int) async throws -> LLMResponse {

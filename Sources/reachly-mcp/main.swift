@@ -72,6 +72,18 @@ enum PostResult {
     case failed(Int, Data)
 }
 
+/// Set by Reachly when it hands this bridge to an agent it runs itself (Qoder in the chat panel), so the app can
+/// say who asks in the approval sheet and audit the commands under that conversation. Only short plain values
+/// are passed on; the app takes only names and ids it knows.
+let callerHeaders: [(String, String)] = {
+    let environment = ProcessInfo.processInfo.environment
+    let plain = { (value: String) in value.count <= 64 && value.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") } }
+    var headers: [(String, String)] = []
+    if let client = environment["REACHLY_MCP_CLIENT"], plain(client) { headers.append(("X-Reachly-Client", client)) }
+    if let conversation = environment["REACHLY_MCP_CONVERSATION"], plain(conversation) { headers.append(("X-Reachly-Conversation", conversation)) }
+    return headers
+}()
+
 func post(_ body: Data, config: BridgeConfig) -> PostResult {
     var request = URLRequest(url: URL(string: "http://127.0.0.1:\(config.port)/mcp")!)
     request.httpMethod = "POST"
@@ -79,6 +91,7 @@ func post(_ body: Data, config: BridgeConfig) -> PostResult {
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
     request.setValue("Bearer \(config.token)", forHTTPHeaderField: "Authorization")
+    for (name, value) in callerHeaders { request.setValue(value, forHTTPHeaderField: name) }
     let semaphore = DispatchSemaphore(value: 0)
     nonisolated(unsafe) var result: PostResult = .unreachable("no response")
     session.dataTask(with: request) { data, response, error in

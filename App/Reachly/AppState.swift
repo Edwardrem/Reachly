@@ -118,6 +118,8 @@ final class AppState {
     var isShowingAgentPanel = false
     /// Commands waiting for the user; the first one is on screen.
     var pendingApprovals: [AgentApprovalPrompt] = []
+    /// An external agent's requests to use its own tools, shown after any waiting command approvals.
+    var pendingAgentPermissions: [AgentPermissionPrompt] = []
     var groupEditor: HostGroup?
     var portForwardEditor: PortForwardEditorTarget?
     var serialProfileEditor: SerialProfileEditorTarget?

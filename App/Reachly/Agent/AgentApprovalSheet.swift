@@ -23,7 +23,13 @@ struct AgentApprovalSheet: View {
     }
 
     private var request: AgentApprovalRequest { prompt.request }
-    private var requesterName: String { request.source == .mcp ? "Claude" : assistantName }
+    /// Who asks: an agent Reachly started itself names itself (Qoder in the chat panel); another MCP client is
+    /// taken to be Claude Desktop or Claude Code; otherwise the panel's own provider.
+    private var requesterName: String { request.requester ?? (request.source == .mcp ? "Claude" : assistantName) }
+    private var requesterDetail: String {
+        if let requester = request.requester { return "Requested by \(requester) in the chat panel, through Reachly's MCP server" }
+        return request.source == .mcp ? "Requested by an MCP client (Claude Desktop or Claude Code)" : "Requested from the Claude panel"
+    }
     private var isEdited: Bool { request.isCommandEditable && command != request.command }
     private var isEmpty: Bool { command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     /// What Send answers; nil while the comment is empty or only whitespace.
@@ -48,7 +54,7 @@ struct AgentApprovalSheet: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(requesterName) wants to run a \(request.isDestructive ? "destructive " : "")command")
                         .font(.headline)
-                    Text(request.source == .mcp ? "Requested by an MCP client (Claude Desktop or Claude Code)" : "Requested from the Claude panel")
+                    Text(requesterDetail)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

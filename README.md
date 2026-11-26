@@ -120,6 +120,19 @@ conversations. Your real hosts never leave your Mac.
   `run_command`, `read_file`, `write_file`, `sftp_transfer` and
   `read_terminal_buffer`, runs commands in a dedicated agent tab you can watch
   and stop with Esc, and conversations are saved per host or group.
+- **Qoder in the chat panel**: choose Qoder (ACP) and the panel runs the Qoder
+  CLI as an Agent Client Protocol agent (`qoder --acp`, or `qoder acp`), one
+  process for the panel, in a folder of its own under Application Support.
+  Qoder uses its own sign-in and models, which Reachly never reads. Reachly
+  advertises no file system or terminal access and hands Qoder its own MCP
+  bridge, so every command on a server goes through the guardrails, the
+  approval sheet ("Qoder wants to run…") and the audit log, filed under the
+  conversation. Qoder's replies, reasoning, tool calls with their status and
+  its plan stream into the transcript; when Qoder asks to use one of its own
+  tools on this Mac, Reachly shows its options in a sheet, and closing it
+  rejects. Stop sends `session/cancel`; a crash leaves a failure row with
+  Retry. Each conversation keeps its Qoder session, and a restarted Qoder
+  loads it back when it offers `session/load`.
 - **Guardrails**: each host is read-only (a safe list such as `ls`, `cat`,
   `systemctl status`), ask (every command in an approval sheet) or allowlist
   (your patterns run, everything else asks). Destructive patterns (`rm -rf`,
@@ -290,7 +303,7 @@ Releases are cut by pushing a `vX.Y.Z` tag; see [docs/RELEASING.md](docs/RELEASI
 | `Sources/ReachlyCore` | SwiftData models (`SSHHost`, `HostGroup`, `Identity`, `Snippet`, `PortForwardRule`, `SerialProfile`, `TerminalThemeRecord`, agent records), known-hosts store, Keychain `SecretStore`, Touch ID `Vault`, `.reachly` export/import, interop parsers, `TerminalTheme` with bundled schemes and importers, cloud providers (SigV4, EC2, DigitalOcean, Azure), appcast parsing |
 | `Sources/ReachlySSH` | SwiftNIO SSH transport: `SSHConnection` (shell, exec, subsystems, direct-tcpip, remote forwards, proxies and jump hosts), key pairs and formats, host-key verification, port forwarders (local, SOCKS5, remote), `SFTPClient` |
 | `Sources/ReachlyTerminal` | `TerminalSession` (SSH chains and serial), workspace and pane tree, credential store and resolver, `KeyPusher`, `PortForwardingManager`, `TransferQueue`, `SerialPort`, the SwiftTerm bridge and `TerminalAppearance` |
-| `Sources/ReachlyAgent` | Agent session, LLM providers (Anthropic, Caimex, OpenAI-compatible), tools, guardrails, MCP server |
+| `Sources/ReachlyAgent` | Agent session, LLM providers (Anthropic, Caimex, OpenAI-compatible), the ACP client for Qoder, tools, guardrails, MCP server |
 | `Sources/reachly-mcp` | The stdio bridge Claude Desktop and Claude Code launch |
 | `App/Reachly` | The SwiftUI app: sidebar, editors, workspace, Identities & Keys, Files (SFTP), Theme Editor, settings, prompts, updater; `Fonts/` holds JetBrains Mono (OFL) |
 | `Tests/` | Unit tests plus opt-in live tests against a real sshd |
@@ -313,8 +326,11 @@ The unit tests cover the key formats, the `.reachly` format and import plan
 (including port-forwarding rules, themes, serial profiles, jump hosts and
 proxies), the SOCKS5 and HTTP CONNECT codecs, the SFTP packet codecs, the
 AWS Signature V4 signer and the EC2 / DigitalOcean / Azure response parsers,
-the theme importers, the command guard, the MCP server and the AI provider
-detection (CLI output, MCP config merge, the rows and prompts). The live tests
+the theme importers, the command guard, the MCP server, the AI provider
+detection (CLI output, MCP config merge, the rows and prompts) and the ACP
+client, against `fake-acp-agent`, a scripted agent the tests start as a
+process (streamed text, reasoning, tool calls, permission requests, errors,
+crashes and cancels). The live tests
 open a real PTY shell, run exec commands, push a key, install the
 shell-integration hooks and check host-key handling against a throwaway sshd.
 

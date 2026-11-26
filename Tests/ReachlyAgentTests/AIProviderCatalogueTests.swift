@@ -7,8 +7,8 @@ struct AIProviderCatalogueTests {
     private let home = "/Users/me"
     private let bridge = "/Applications/Reachly.app/Contents/MacOS/reachly-mcp"
 
-    private func reachly(_ kind: LLMProviderConfiguration.Kind = .anthropic, hasKey: Bool = false, keyFor: String? = nil, baseURL: String = "", model: String = "", mcp: Bool = true, bridgePath: String? = nil) -> ReachlyAIState {
-        ReachlyAIState(kind: kind, hasKey: hasKey, savedKeyOrigin: keyFor.flatMap(EndpointOrigin.init(baseURL:)), baseURL: baseURL, model: model, bridgePath: bridgePath ?? bridge, mcpServerEnabled: mcp, mcpPort: 7317)
+    private func reachly(_ kind: LLMProviderConfiguration.Kind = .anthropic, hasKey: Bool = false, keyFor: String? = nil, baseURL: String = "", model: String = "", mcp: Bool = true, bridgePath: String? = nil, acp: String? = nil) -> ReachlyAIState {
+        ReachlyAIState(kind: kind, hasKey: hasKey, savedKeyOrigin: keyFor.flatMap(EndpointOrigin.init(baseURL:)), baseURL: baseURL, model: model, bridgePath: bridgePath ?? bridge, mcpServerEnabled: mcp, mcpPort: 7317, acpCommandPath: acp)
     }
 
     private func row(_ id: AIProviderRow.ID, _ machine: AIProviderMachineFacts, _ state: ReachlyAIState? = nil) throws -> AIProviderRow {
@@ -217,7 +217,9 @@ struct AIProviderCatalogueTests {
     @Test func qoderAppOnlyShowsSteps() throws {
         let qoder = try row(.qoder, thisMac)
         #expect(qoder.title == "Qoder")
-        #expect(qoder.actions == [.showQoderAppSteps])
+        #expect(qoder.actions == [.showQoderAppSteps, .openLink(.qoderCLI)], "the chat panel needs the CLI, so the row links to it")
+        #expect(qoder.note?.contains("install the Qoder CLI") == true)
+        #expect(AIProviderLink.qoderCLI.url.absoluteString == "https://docs.qoder.com/en/cli/quick-start")
     }
 
     @Test func qoderCLIConnectsItself() throws {
@@ -225,7 +227,7 @@ struct AIProviderCatalogueTests {
         machine.qoder = .init(appInstalled: true, cliPath: "/usr/local/bin/qoder", config: .notConnected)
         let qoder = try row(.qoder, machine)
         #expect(qoder.title == "Qoder and Qoder CLI")
-        #expect(qoder.actions == [.connectQoderCLI])
+        #expect(qoder.actions == [.useQoderInChat, .connectQoderCLI])
 
         machine.qoder = .init(appInstalled: false, cliPath: "/usr/local/bin/qoder", config: .missing)
         #expect(try row(.qoder, machine).title == "Qoder CLI")
@@ -237,6 +239,43 @@ struct AIProviderCatalogueTests {
         let qoder = try row(.qoder, machine)
         #expect(qoder.status == .connected)
         #expect(qoder.actions.isEmpty)
+
+        machine.qoder = .init(appInstalled: true, cliPath: "/usr/local/bin/qoder", config: .connected(command: bridge))
+        #expect(try row(.qoder, machine).actions == [.useQoderInChat], "connected for its own sessions, and it can still chat in the panel")
+    }
+
+    @Test func qoderInTheChatPanel() throws {
+        var machine = thisMac
+        machine.qoder = .init(appInstalled: false, cliPath: "/usr/local/bin/qoder", config: .notConnected)
+        let inUse = try row(.qoder, machine, reachly(.qoder, acp: "/usr/local/bin/qoder"))
+        #expect(inUse.status == .inUse)
+        #expect(inUse.actions.isEmpty)
+        #expect(inUse.detail == "Answers in Reachly's chat panel over ACP.")
+        #expect(inUse.note?.contains("Qoder's own tools run on this Mac under Qoder's rules, and Reachly's tools run on servers under Reachly's.") == true)
+
+        let serverOff = try row(.qoder, machine, reachly(.qoder, mcp: false, acp: "/usr/local/bin/qoder"))
+        #expect(serverOff.status == .needsAction)
+        #expect(serverOff.actions == [.turnOnMCPServer])
+        #expect(serverOff.detail.contains("MCP server is off"))
+
+        let elsewhere = try row(.qoder, machine, reachly(.qoder, acp: "/opt/old/qoder"))
+        #expect(elsewhere.status == .needsAction)
+        #expect(elsewhere.actions == [.useQoderInChat])
+    }
+
+    @Test func usingQoderInChatSaysWhatRuns() throws {
+        var machine = thisMac
+        machine.qoder = .init(appInstalled: true, cliPath: "/Users/me/.local/bin/qoder", config: .notConnected)
+        let shown = try #require(AIProviderCatalogue.prompt(for: .useQoderInChat, machine: machine, reachly: reachly(mcp: false), home: home))
+        #expect(shown.detail == "~/.local/bin/qoder --acp")
+        #expect(shown.command == MCPConnectCommand(executable: "/Users/me/.local/bin/qoder", arguments: ["--acp"]))
+        #expect(shown.confirmTitle == "Use Qoder")
+        #expect(shown.message.contains("never reads"))
+        #expect(shown.message.contains("guardrails, approval sheet and audit log"))
+        #expect(shown.message.contains("not your home folder"))
+        #expect(shown.message.contains("turned on too"))
+        let gone = try #require(AIProviderCatalogue.prompt(for: .useQoderInChat, machine: thisMac, reachly: reachly(), home: home))
+        #expect(gone.confirmTitle == nil, "the app alone can't chat")
     }
 
     // MARK: ChatGPT and Codex
@@ -345,7 +384,7 @@ struct AIProviderCatalogueTests {
     @Test func everyChangeAsksFirst() {
         let changing: [AIProviderAction] = [
             .useCaimexKey, .useLocalServer(.lmStudio), .useLocalServer(.ollama), .connectClaudeCode, .connectClaudeDesktop,
-            .connectQoderCLI, .setUpOpenAIEndpoint, .useEnvironmentKey(.anthropic), .useEnvironmentKey(.openAI), .turnOnMCPServer,
+            .connectQoderCLI, .useQoderInChat, .setUpOpenAIEndpoint, .useEnvironmentKey(.anthropic), .useEnvironmentKey(.openAI), .turnOnMCPServer,
         ]
         var machine = thisMac
         machine.qoder = .init(appInstalled: true, cliPath: "/usr/local/bin/qoder", config: .notConnected)

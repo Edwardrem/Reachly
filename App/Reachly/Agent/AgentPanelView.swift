@@ -26,6 +26,9 @@ struct AgentPanelView: View {
                 emptyState
             }
             ChromeDivider()
+            if controller.externalAgentNeedsMCPServer {
+                MCPServerOffBanner(agentName: controller.nextAssistantName)
+            }
             statusLine
             composer
         }
@@ -180,7 +183,9 @@ struct AgentPanelView: View {
             Text("Ask \(controller.nextAssistantName)")
                 .font(.title2.weight(.semibold))
                 .foregroundStyle(palette.text)
-            Text("\(controller.nextAssistantName) inspects and operates your hosts over SSH, reads files you attach, and writes reports as PDF or Word. Every command shows in an agent tab, and the host's permission mode decides what asks first.")
+            Text(controller.nextAssistantIsExternal
+                ? "\(controller.nextAssistantName) works on your hosts through Reachly's MCP server: every command shows in an agent tab, and the host's permission mode decides what asks first. \(controller.nextAssistantName)'s own tools run on this Mac under \(controller.nextAssistantName)'s rules, and Reachly asks you before each one."
+                : "\(controller.nextAssistantName) inspects and operates your hosts over SSH, reads files you attach, and writes reports as PDF or Word. Every command shows in an agent tab, and the host's permission mode decides what asks first.")
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -282,8 +287,10 @@ private struct AgentStatusLine: View {
                     Text("\(session.usage.inputTokens.formatted()) in · \(session.usage.outputTokens.formatted()) out")
                 }
             } else {
-                providerBadge(for: AgentSettings.shared.configuration.kind)
-                Text(AgentSettings.shared.configuration.model)
+                let configuration = AgentSettings.shared.configuration
+                providerBadge(for: configuration.kind)
+                // Qoder picks its own model.
+                Text(configuration.kind.isExternalAgent ? "Starts with your first message" : configuration.model)
             }
             Spacer()
             if let session, session.isRunning {
@@ -306,6 +313,10 @@ private struct AgentStatusLine: View {
             Text("Caimex")
                 .padding(.horizontal, 5)
                 .background(Design.Tint.conversation.opacity(0.22), in: Capsule())
+        } else if kind == .qoder {
+            Text("Qoder · ACP")
+                .padding(.horizontal, 5)
+                .background(Design.Tint.command.opacity(0.22), in: Capsule())
         }
     }
 }
@@ -809,6 +820,12 @@ private struct AgentMessageView: View {
                         ToolCallView(name: name, input: input, result: results[id])
                     case .failure(let failure):
                         FailureRow(failure: failure, message: message)
+                    case .agentToolCall(let call):
+                        AgentActivityView(call: call)
+                    case .plan(let entries):
+                        AgentPlanView(entries: entries)
+                    case .notice(let text):
+                        AgentNoticeView(text: text)
                     case .toolResult, .attachment:
                         EmptyView()
                     }
@@ -905,6 +922,23 @@ private struct AgentStreamingView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            // An external agent's finished blocks, in the order they came.
+            ForEach(Array(session.streamingBlocks.enumerated()), id: \.offset) { _, block in
+                switch block {
+                case .text(let text):
+                    MarkdownText(text)
+                case .thinking(let text, _):
+                    ThinkingView(text: text)
+                case .agentToolCall(let call):
+                    AgentActivityView(call: call)
+                case .plan(let entries):
+                    AgentPlanView(entries: entries)
+                case .notice(let text):
+                    AgentNoticeView(text: text)
+                default:
+                    EmptyView()
+                }
+            }
             if !session.streamingThinking.isEmpty {
                 ThinkingView(text: session.streamingThinking, expanded: true)
             }
@@ -1337,5 +1371,143 @@ private struct ToolCallView: View {
             }
             .card(padding: 9, radius: Design.radiusMedium)
         }
+    }
+}
+
+// MARK: - An external agent's activity
+
+/// One of an external agent's tool calls (Qoder over ACP), with its live status, collapsed to one line until
+/// clicked. Reachly's own tools reached over MCP appear here as Qoder reports them, and also in agent tabs.
+private struct AgentActivityView: View {
+    let call: AgentToolActivity
+    @State private var isExpanded = false
+
+    private var statusColor: Color {
+        switch call.status {
+        case .pending: .orange
+        case .inProgress: .blue
+        case .completed: .green
+        case .failed: .red
+        case .cancelled: .secondary
+        }
+    }
+
+    private var statusText: String {
+        switch call.status {
+        case .pending: "waiting"
+        case .inProgress: "running"
+        case .completed: "done"
+        case .failed: "failed"
+        case .cancelled: "cancelled"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button {
+                isExpanded.toggle()
+            } label: {
+                HStack(spacing: 8) {
+                    IconTile(systemImage: AgentToolActivityText.symbol(call.kind), color: call.kind == "execute" ? Design.Tint.command : Design.Tint.read, size: 24)
+                        .overlay(alignment: .bottomTrailing) {
+                            StatusDot(color: statusColor, size: 7).offset(x: 3, y: 3)
+                        }
+                    Text(call.title).font(.callout.monospaced()).lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                    if call.status == .inProgress {
+                        ProgressView().controlSize(.mini)
+                    }
+                    Text(statusText).font(.caption).foregroundStyle(.secondary)
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right").font(.caption).foregroundStyle(.tertiary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if let permission = call.permission {
+                Text(permission).font(.caption).foregroundStyle(.secondary).padding(.leading, 32)
+            }
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(AgentToolActivityText.kind(call.kind)).font(.caption).foregroundStyle(.secondary)
+                    if !call.locations.isEmpty {
+                        Text(call.locations.joined(separator: "\n")).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
+                    }
+                    if let input = call.input, !input.isEmpty {
+                        ScrollView(.horizontal) {
+                            Text(input).font(.callout.monospaced()).textSelection(.enabled)
+                        }
+                        .frame(maxHeight: 160)
+                    }
+                    ScrollView(.horizontal) {
+                        Text(call.output.isEmpty ? (call.status.isFinished ? "No output." : "Waiting…") : call.output)
+                            .font(.callout.monospaced())
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 240)
+                }
+                .padding(.leading, 32)
+            }
+        }
+        .card(padding: 9, radius: Design.radiusMedium)
+    }
+}
+
+/// An external agent's plan for the turn: each entry with its status. Each update replaces it.
+private struct AgentPlanView: View {
+    let entries: [AgentPlanEntry]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Label("Plan", systemImage: "list.bullet.clipboard").font(.callout).foregroundStyle(.secondary)
+            ForEach(Array(entries.enumerated()), id: \.offset) { _, entry in
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Image(systemName: entry.status == .completed ? "checkmark.circle.fill" : (entry.status == .inProgress ? "circle.dotted.circle" : "circle"))
+                        .foregroundStyle(entry.status == .completed ? AnyShapeStyle(.green) : AnyShapeStyle(.secondary))
+                    Text(entry.content)
+                        .strikethrough(entry.status == .completed, color: .secondary)
+                        .fontWeight(entry.priority == "high" ? .semibold : .regular)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .font(.callout)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .card(padding: 9, radius: Design.radiusMedium)
+    }
+}
+
+/// Something the reader should know that is not part of the reply, such as a new agent session.
+private struct AgentNoticeView: View {
+    let text: String
+
+    var body: some View {
+        Label(text, systemImage: "info.circle")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// Qoder is chosen but Reachly's MCP server is off: without it Qoder could not reach the servers.
+private struct MCPServerOffBanner: View {
+    let agentName: String
+    @Environment(MCPServerController.self) private var mcp
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            Text("\(agentName) reaches your servers through Reachly's MCP server, which is off.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 4)
+            Button("Turn On") { mcp.isEnabled = true }
+                .controlSize(.small)
+                .help("Turn on Reachly's MCP server on 127.0.0.1, with a bearer token")
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 7)
     }
 }

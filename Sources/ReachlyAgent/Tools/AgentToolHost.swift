@@ -50,9 +50,13 @@ public struct AgentApprovalRequest: Sendable, Identifiable {
     /// Why the guardrails are asking (destructive pattern, mode).
     public var detail: String
     public var isDestructive: Bool
+    /// Who asked, when an MCP client said so and Reachly knows it (Qoder in the chat panel). Nil for the panel's
+    /// own provider and for MCP clients that did not say.
+    public var requester: String?
 
-    public init(id: UUID = UUID(), source: AgentActionSource, host: AgentHostInfo, tool: String, command: String, reason: String, detail: String, isDestructive: Bool) {
+    public init(id: UUID = UUID(), source: AgentActionSource, host: AgentHostInfo, tool: String, command: String, reason: String, detail: String, isDestructive: Bool, requester: String? = nil) {
         self.id = id
+        self.requester = requester
         self.source = source
         self.host = host
         self.tool = tool

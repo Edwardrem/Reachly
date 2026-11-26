@@ -98,12 +98,16 @@ public struct LLMProviderConfiguration: Codable, Sendable, Equatable {
         case anthropic
         case caimex
         case openAICompatible = "openai-compatible"
+        /// The Qoder CLI as an Agent Client Protocol agent (`qoder --acp`): it runs its own loop and tools,
+        /// signs in with its own account, and reaches the user's servers through Reachly's MCP server.
+        case qoder = "qoder-acp"
 
         public var displayName: String {
             switch self {
             case .anthropic: "Anthropic (Claude)"
             case .caimex: "Caimex"
             case .openAICompatible: "OpenAI-compatible endpoint"
+            case .qoder: "Qoder (ACP)"
             }
         }
 
@@ -113,6 +117,7 @@ public struct LLMProviderConfiguration: Codable, Sendable, Equatable {
             case .anthropic: "Claude"
             case .caimex: "Caimex"
             case .openAICompatible: "AI"
+            case .qoder: "Qoder"
             }
         }
 
@@ -120,8 +125,20 @@ public struct LLMProviderConfiguration: Codable, Sendable, Equatable {
         public var requiresAPIKey: Bool {
             switch self {
             case .anthropic, .caimex: true
-            case .openAICompatible: false
+            case .openAICompatible, .qoder: false
             }
+        }
+
+        /// Whether Reachly keeps a key for this kind at all. Qoder signs in with its own account (the Qoder CLI's
+        /// login), so Reachly neither stores nor reads a key for it, and makes no Keychain call for it.
+        public var usesAPIKey: Bool {
+            self != .qoder
+        }
+
+        /// An agent that runs its own loop and tools over the Agent Client Protocol, rather than a model
+        /// endpoint Reachly drives with its own tools.
+        public var isExternalAgent: Bool {
+            self == .qoder
         }
 
         /// The provider name for messages about its key, so the Anthropic wording stays "Anthropic".
@@ -130,6 +147,7 @@ public struct LLMProviderConfiguration: Codable, Sendable, Equatable {
             case .anthropic: "Anthropic"
             case .caimex: "Caimex"
             case .openAICompatible: "endpoint"
+            case .qoder: "Qoder"
             }
         }
     }
@@ -141,6 +159,9 @@ public struct LLMProviderConfiguration: Codable, Sendable, Equatable {
     public var baseURL: String
     /// Anthropic `output_config.effort`; nil leaves the model's default.
     public var effort: String?
+    /// For Qoder: the Qoder CLI the user confirmed in AI Integration (or typed in Settings), started as
+    /// `<path> --acp`. Nil until then, and the panel asks for it before anything runs.
+    public var acpCommandPath: String?
 
     /// The fixed Caimex gateway. Nothing the user types can change it.
     public static let caimexBaseURL = URL(string: "https://api.caimex.ai/v1")!
@@ -154,7 +175,7 @@ public struct LLMProviderConfiguration: Codable, Sendable, Equatable {
         switch kind {
         case .anthropic: defaultAnthropicModel
         case .caimex: defaultCaimexModel
-        case .openAICompatible: ""
+        case .openAICompatible, .qoder: ""
         }
     }
 
@@ -171,17 +192,18 @@ public struct LLMProviderConfiguration: Codable, Sendable, Equatable {
         set { models[kind] = newValue }
     }
 
-    public init(kind: Kind = .anthropic, model: String? = nil, baseURL: String = "", effort: String? = nil) {
+    public init(kind: Kind = .anthropic, model: String? = nil, baseURL: String = "", effort: String? = nil, acpCommandPath: String? = nil) {
         self.kind = kind
         self.baseURL = baseURL
         self.effort = effort
+        self.acpCommandPath = acpCommandPath
         var models = Dictionary(uniqueKeysWithValues: Kind.allCases.map { ($0, Self.defaultModel(for: $0)) })
         models[kind] = model ?? Self.defaultModel(for: kind)
         self.models = models
     }
 
     private enum CodingKeys: String, CodingKey {
-        case kind, model, models, baseURL, effort
+        case kind, model, models, baseURL, effort, acpCommandPath
     }
 
     /// Reads 0.3.8 files (one `model` for the saved kind) and the per-kind map this version writes.
@@ -191,6 +213,7 @@ public struct LLMProviderConfiguration: Codable, Sendable, Equatable {
         self.kind = kind
         self.baseURL = try container.decodeIfPresent(String.self, forKey: .baseURL) ?? ""
         self.effort = try container.decodeIfPresent(String.self, forKey: .effort)
+        self.acpCommandPath = try container.decodeIfPresent(String.self, forKey: .acpCommandPath)
 
         var models = Dictionary(uniqueKeysWithValues: Kind.allCases.map { ($0, Self.defaultModel(for: $0)) })
         let stored = try container.decodeIfPresent([String: String].self, forKey: .models)
@@ -214,6 +237,7 @@ public struct LLMProviderConfiguration: Codable, Sendable, Equatable {
         try container.encode(model, forKey: .model)
         try container.encode(baseURL, forKey: .baseURL)
         try container.encodeIfPresent(effort, forKey: .effort)
+        try container.encodeIfPresent(acpCommandPath, forKey: .acpCommandPath)
     }
 
     /// Builds the provider. Throws when the configuration is incomplete.
@@ -230,6 +254,9 @@ public struct LLMProviderConfiguration: Codable, Sendable, Equatable {
                 throw LLMError.invalidBaseURL(baseURL)
             }
             return OpenAICompatibleProvider(baseURL: url, apiKey: apiKey ?? "", model: model)
+        case .qoder:
+            // Not a model endpoint: the panel drives it as an `ExternalAgent` (see `ACPAgent`).
+            throw LLMError.invalidResponse("Qoder runs as an ACP agent, not a model endpoint")
         }
     }
 }
@@ -242,6 +269,9 @@ extension LLMProviderConfiguration.Kind {
         case .anthropic: SecretAccount.agentAPIKey
         case .caimex: SecretAccount.caimexAPIKey
         case .openAICompatible: SecretAccount.openAICompatibleAPIKey
+        // Never read or written: Qoder has no key in Reachly (`usesAPIKey`), and `APIKeyMigration.account(for:)`
+        // answers nil for it, so no Keychain call names this account.
+        case .qoder: "agent.qoder.unused"
         }
     }
 
@@ -252,6 +282,7 @@ extension LLMProviderConfiguration.Kind {
         case .anthropic: "Reachly Claude API key"
         case .caimex: "Reachly Caimex API key"
         case .openAICompatible: "Reachly endpoint API key"
+        case .qoder: "Reachly Qoder (unused)"
         }
     }
 
@@ -267,7 +298,7 @@ extension LLMProviderConfiguration.Kind {
         switch self {
         case .anthropic: URL(string: "https://platform.claude.com/settings/keys")
         case .caimex: URL(string: "https://caimex.ai/api-keys")
-        case .openAICompatible: nil
+        case .openAICompatible, .qoder: nil
         }
     }
 
@@ -276,7 +307,7 @@ extension LLMProviderConfiguration.Kind {
         switch self {
         case .anthropic: "Claude Console › Settings › API keys. The secret is shown only once, when the key is created."
         case .caimex: "Caimex › Developer › API keys, once you are signed in."
-        case .openAICompatible: nil
+        case .openAICompatible, .qoder: nil
         }
     }
 }

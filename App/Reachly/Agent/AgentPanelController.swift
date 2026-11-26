@@ -54,11 +54,38 @@ final class AgentPanelController {
     /// The kind of the provider actually built for this session, for the status badge. nil until built.
     private(set) var providerKind: LLMProviderConfiguration.Kind?
 
+    /// Reachly's MCP server, which an external agent (Qoder) uses to reach the servers. Set by `ContentView`.
+    var mcpServer: MCPServerController?
+    /// The ACP agent the panel runs, while Qoder is the provider: one process for the panel, started by the
+    /// first message and stopped when the panel closes or another provider is chosen.
+    private var externalAgent: ACPAgent?
+
+    /// A reply is running in the panel.
+    var isReplying: Bool { session?.isRunning == true }
+
+    /// Qoder is chosen but Reachly's MCP server is off, so Qoder could not reach the servers. The panel offers
+    /// to turn it on.
+    var externalAgentNeedsMCPServer: Bool {
+        settings.configuration.kind.isExternalAgent && mcpServer?.isEnabled != true
+    }
+
+    /// Each conversation's last agent session, for `session/load`: ids only.
+    static var externalAgentSessions: ACPSessionStore {
+        ACPSessionStore(url: AppPaths.applicationSupport.appending(path: "Agent/ACP/sessions.json"))
+    }
+
+    /// Where an external agent works and keeps nothing of Reachly's: its `cwd`, never the home folder.
+    static var externalAgentWorkspace: URL {
+        AppPaths.applicationSupport.appending(path: "Agent/ACP/Workspace", directoryHint: .isDirectory)
+    }
+
     /// The name for whoever answers here: the provider built for this session, or the one chosen in
     /// Settings before the first message.
     var assistantName: String { (providerKind ?? settings.configuration.kind).agentName }
     /// Who answers the next message: the provider chosen in Settings.
     var nextAssistantName: String { settings.configuration.kind.agentName }
+    /// The next message goes to an agent that runs its own loop (Qoder over ACP).
+    var nextAssistantIsExternal: Bool { settings.configuration.kind.isExternalAgent }
 
     /// Copies of attached files live here, one folder per attachment.
     static var attachmentsDirectory: URL {
@@ -162,6 +189,9 @@ final class AgentPanelController {
     }
 
     func delete(_ stored: AgentConversation) {
+        // Its agent session is not loaded again.
+        externalAgent?.forgetSession(for: stored.uuid.uuidString)
+        Self.externalAgentSessions.set(nil, for: stored.uuid.uuidString)
         if stored === conversation { newConversation() }
         context.delete(stored)
         try? context.save()
@@ -389,6 +419,16 @@ final class AgentPanelController {
     private func prepareProvider(for session: AgentSession) async throws {
         // One snapshot before any await: the prompt must not be able to retarget the key or host.
         let plan = settings.providerPlan()
+        if plan.configuration.kind.isExternalAgent {
+            session.externalAgent = try prepareExternalAgent(plan.configuration)
+            providerConfiguration = plan.configuration
+            providerKind = plan.configuration.kind
+            session.systemPrompt = externalAgentContext(agentName: plan.configuration.kind.agentName)
+            return
+        }
+        // Another provider answers now: the agent process goes.
+        session.externalAgent = nil
+        stopExternalAgent()
         if providerConfiguration != plan.configuration
             || providerKeyVersion != plan.keyVersion
             || session.provider is PlaceholderProvider {
@@ -402,6 +442,88 @@ final class AgentPanelController {
 
     func stop() {
         session?.stop()
+    }
+
+    // MARK: External agent
+
+    /// The ACP agent for this configuration, made on first use. Throws, before anything is sent, when the CLI
+    /// is not chosen or gone, or when Reachly's MCP server is off: without it Qoder could not reach the servers
+    /// under Reachly's guardrails.
+    private func prepareExternalAgent(_ configuration: LLMProviderConfiguration) throws -> ACPAgent {
+        let name = configuration.kind.agentName
+        guard let command = configuration.acpCommandPath?.trimmingCharacters(in: .whitespacesAndNewlines), !command.isEmpty else {
+            throw AgentSetupError(message: "Choose the \(name) CLI first: in Settings › AI Integration, click Use in Chat Panel on the Qoder row.")
+        }
+        guard FileManager.default.isExecutableFile(atPath: command) else {
+            throw AgentSetupError(message: "The \(name) CLI isn't at \(command) any more. Click Check Again in Settings › AI Integration, then Use in Chat Panel.")
+        }
+        guard let mcpServer, mcpServer.isRunning else {
+            throw AgentSetupError(message: "\(name) reaches your servers only through Reachly's MCP server, which is off. Turn it on (the button above, or Settings › AI Integration › MCP server), then Retry.")
+        }
+        if let externalAgent, externalAgent.configuration.executable == command {
+            return externalAgent
+        }
+        stopExternalAgent()
+        let agent = ACPAgent(configuration: Self.externalAgentConfiguration(name: name, command: command, bridgePath: mcpServer.bridgePath))
+        agent.permissionHandler = { [toolHost] request in await toolHost.askPermission(request) }
+        externalAgent = agent
+        return agent
+    }
+
+    /// How Qoder is run: the CLI in ACP mode (`--acp`, then `acp`), in Reachly's own folder, with the app's
+    /// environment and the usual bin folders on PATH, and Reachly's stdio MCP bridge in every session. The
+    /// bridge finds the server's port and token in Reachly's data folder itself, so no token is handed over,
+    /// and it tells the server which conversation the commands belong to.
+    static func externalAgentConfiguration(name: String, command: String, bridgePath: String) -> ACPAgent.Configuration {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let dataDirectory = AppPaths.applicationSupport.path
+        let binary = URL(fileURLWithPath: command).lastPathComponent
+        return ACPAgent.Configuration(
+            name: name,
+            executable: command,
+            argumentSets: [["--acp"], ["acp"]],
+            environment: ProviderDetector.toolEnvironment(for: command, home: home),
+            workingDirectory: externalAgentWorkspace,
+            mcpServers: { conversation in
+                [ACPProtocol.StdioMCPServer(
+                    name: MCPClientConfig.serverName,
+                    command: bridgePath,
+                    environment: [
+                        ("REACHLY_DATA_DIR", dataDirectory),
+                        ("REACHLY_MCP_CLIENT", "qoder"),
+                        ("REACHLY_MCP_CONVERSATION", conversation),
+                    ])]
+            },
+            clientVersion: UpdateManager.currentShortVersion,
+            sessionStore: externalAgentSessions,
+            signInHint: "Run `\(binary) login` in Terminal, or start Reachly with QODER_PERSONAL_ACCESS_TOKEN set, then Retry. Reachly never sees \(name)'s sign-in.")
+    }
+
+    /// Stops the agent process. The next message starts it again.
+    func stopExternalAgent() {
+        externalAgent?.shutdown()
+        externalAgent = nil
+        session?.externalAgent = nil
+    }
+
+    /// The panel closed: the agent process goes once no reply is running.
+    func stopExternalAgentIfIdle() {
+        guard externalAgent != nil, !isReplying, !isPreparing else { return }
+        stopExternalAgent()
+    }
+
+    private func externalAgentContext(agentName: String) -> String {
+        let infos = toolHost.hosts()
+        switch scope {
+        case .all:
+            return AgentSystemPrompt.externalAgentContext(hosts: infos, focus: nil, agentName: agentName)
+        case .host(let id):
+            return AgentSystemPrompt.externalAgentContext(hosts: infos, focus: infos.first { $0.id == id }, agentName: agentName)
+        case .group(let id):
+            let group = groups.first { $0.uuid == id }
+            let members = Set(group?.hosts.map(\.uuid) ?? [])
+            return AgentSystemPrompt.externalAgentContext(hosts: infos.filter { members.contains($0.id) }, focus: nil, groupName: group?.name, agentName: agentName)
+        }
     }
 
     private func makeSession(messages: [AgentMessage]) -> AgentSession {

@@ -17,7 +17,7 @@ public final class MCPServer: @unchecked Sendable {
     public let serverName: String
     public let serverVersion: String
     private let token: String
-    private let runner: AgentToolRunner
+    private let runners: RunnerPool
     private let group: any EventLoopGroup
     private var channel: Channel?
     private let lock = NSLock()
@@ -31,7 +31,62 @@ public final class MCPServer: @unchecked Sendable {
         self.serverName = serverName
         self.serverVersion = serverVersion
         self.group = group
-        runner = AgentToolRunner(host: toolHost, source: .mcp)
+        runners = RunnerPool(host: toolHost)
+    }
+
+    // MARK: Callers
+
+    /// Who is calling, as the stdio bridge says from its environment: `X-Reachly-Client` names a client
+    /// Reachly started itself (Qoder in the chat panel), and `X-Reachly-Conversation` the panel conversation
+    /// its commands belong to in the audit log. Only names in `knownClients` and well-formed ids are taken;
+    /// anything else is an ordinary MCP client. Either way the token was checked first and the same guardrails
+    /// apply: this only changes what the approval sheet says and where the audit entries point.
+    public struct Caller: Hashable, Sendable {
+        public var requester: String?
+        public var conversationID: UUID?
+
+        public init(requester: String? = nil, conversationID: UUID? = nil) {
+            self.requester = requester
+            self.conversationID = conversationID
+        }
+
+        public static let unknown = Caller()
+    }
+
+    /// The `X-Reachly-Client` values Reachly sets, and the name each shows in the approval sheet.
+    public static let knownClients = ["qoder": "Qoder"]
+    public static let clientHeader = "X-Reachly-Client"
+    public static let conversationHeader = "X-Reachly-Conversation"
+
+    static func caller(from headers: HTTPHeaders) -> Caller {
+        caller(client: headers.first(name: clientHeader), conversation: headers.first(name: conversationHeader))
+    }
+
+    static func caller(client: String?, conversation: String?) -> Caller {
+        guard let requester = client.flatMap({ knownClients[$0.lowercased()] }) else { return .unknown }
+        return Caller(requester: requester, conversationID: conversation.flatMap(UUID.init(uuidString:)))
+    }
+
+    /// One guarded runner per caller, so each conversation's commands are audited under it.
+    @MainActor
+    final class RunnerPool {
+        private let host: any AgentToolHost
+        private var runners: [Caller: AgentToolRunner] = [:]
+        /// The most runners kept; past it, all but the plain MCP one are let go (they hold no state of their own).
+        static let limit = 64
+
+        init(host: any AgentToolHost) {
+            self.host = host
+        }
+
+        func runner(for caller: Caller) -> AgentToolRunner {
+            if let runner = runners[caller] { return runner }
+            if runners.count >= Self.limit { runners = runners.filter { $0.key == .unknown } }
+            let runner = AgentToolRunner(host: host, source: .mcp, conversationID: caller.conversationID)
+            runner.requester = caller.requester
+            runners[caller] = runner
+            return runner
+        }
     }
 
     /// Binds 127.0.0.1 on `port` (0 picks a free one) and returns the port.
@@ -140,7 +195,7 @@ public final class MCPServer: @unchecked Sendable {
                 continue
             }
             do {
-                let result = try await dispatch(rpc)
+                let result = try await dispatch(rpc, caller: Self.caller(from: request.headers))
                 if rpc.method == "initialize" {
                     let session = UUID().uuidString
                     lock.withLock { _ = sessions.insert(session) }
@@ -163,7 +218,7 @@ public final class MCPServer: @unchecked Sendable {
         // notifications/initialized, notifications/cancelled: nothing to do.
     }
 
-    func dispatch(_ request: JSONRPC.Request) async throws -> JSONValue {
+    func dispatch(_ request: JSONRPC.Request, caller: Caller = .unknown) async throws -> JSONValue {
         switch request.method {
         case "initialize":
             let requested = request.params?["protocolVersion"]?.stringValue ?? ""
@@ -183,6 +238,7 @@ public final class MCPServer: @unchecked Sendable {
                 throw JSONRPC.ErrorObject(code: JSONRPC.ErrorObject.invalidParams, message: "tools/call needs a name")
             }
             let arguments = request.params?["arguments"] ?? .object([:])
+            let runner = await runners.runner(for: caller)
             let result = await runner.call(name: name, input: arguments)
             return ["content": [["type": "text", "text": .string(result.content)]], "isError": .bool(result.isError)]
         case "resources/list":

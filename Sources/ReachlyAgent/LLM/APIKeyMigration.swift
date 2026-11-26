@@ -70,6 +70,8 @@ public struct APIKeyMigration {
     /// The account this kind may use right now, or nil when its key must not be read. While a move is
     /// pending the old item is an endpoint key, so it is never offered to Anthropic.
     public func account(for kind: LLMProviderConfiguration.Kind) -> String? {
+        // A kind without a key in Reachly (Qoder signs in on its own) has no account, so nothing asks the Keychain.
+        guard kind.usesAPIKey else { return nil }
         if recordedState == .pendingMove, kind == .anthropic { return nil }
         return kind.keychainAccount
     }

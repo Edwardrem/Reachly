@@ -82,6 +82,27 @@ struct MCPServerTests {
         #expect(ping?["result"]?.objectValue?.isEmpty == true)
     }
 
+    @Test func qoderInThePanelIsNamedInTheSheetAndAuditedUnderItsConversation() async throws {
+        let (server, host, plain) = try await startServer()
+        defer { Task { await server.stop() } }
+        let conversation = UUID()
+        var qoder = plain
+        qoder.extraHeaders = [MCPServer.clientHeader: "qoder", MCPServer.conversationHeader: conversation.uuidString]
+
+        // web-01 asks for every command, so the request reaches the approval sheet.
+        _ = try await qoder.call(1, "tools/call", ["name": "run_command", "arguments": ["host": "web-01", "command": "df -h", "reason": "disk"]])
+        _ = try await plain.call(2, "tools/call", ["name": "run_command", "arguments": ["host": "web-01", "command": "uptime", "reason": "load"]])
+        var spoofed = plain
+        spoofed.extraHeaders = [MCPServer.clientHeader: "Totally Legit", MCPServer.conversationHeader: conversation.uuidString]
+        _ = try await spoofed.call(3, "tools/call", ["name": "run_command", "arguments": ["host": "web-01", "command": "whoami", "reason": "who"]])
+        await MainActor.run {
+            #expect(host.approvalRequests.map(\.requester) == ["Qoder", nil, nil], "only a name Reachly knows is shown")
+            #expect(host.approvalRequests.allSatisfy { $0.source == .mcp }, "the same guardrails as any MCP client")
+            #expect(host.auditRecords.map(\.conversationID) == [conversation, nil, nil])
+            #expect(host.executed.map(\.command) == ["df -h", "uptime", "whoami"])
+        }
+    }
+
     @Test func batchesAuthAndOrigin() async throws {
         let (server, _, client) = try await startServer()
         defer { Task { await server.stop() } }
