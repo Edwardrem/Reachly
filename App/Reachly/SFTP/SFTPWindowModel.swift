@@ -457,6 +457,8 @@ final class SFTPWindowModel {
     /// Pastes the clipboard into `folder` on `side` (nil: that pane's current folder), following `PastePlan`.
     func paste(into side: Side, folder: String? = nil) async {
         guard let clipboard, !isPasting else { return }
+        // The files behind it as they are now: a Copy or Cut made while this paste waits must not change what it moves.
+        let files = clipboardFiles
         isPasting = true
         defer { isPasting = false }
         let cutRowsBefore = cutRows
@@ -501,7 +503,7 @@ final class SFTPWindowModel {
                     failed.append((SFTP.baseName(from), PaneModel.describe(error)))
                 }
             case .transfer(let item, let into, let name, let deleteSourceWhenDone):
-                let file = clipboardFiles[item.path] ?? FileItem(item)
+                let file = files[item.path] ?? FileItem(item)
                 do {
                     // A Cut removes only what it moved, as it is now: a file, or a symlink itself (never what it
                     // leads to), is looked at before its transfer starts; a folder's walk is taken as it is queued.

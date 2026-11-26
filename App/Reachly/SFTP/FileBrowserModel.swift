@@ -141,6 +141,8 @@ final class LocalBackend: FileSystemBackend {
     }
 
     func copy(_ path: String, to newPath: String) async throws {
+        // Judged on resolved paths: a folder copied into itself through a symlink would never end.
+        try LocalFileOps.refuseFolderIntoItself(path, newPath)
         // copyItem refuses an existing target. Off the main thread: a large folder takes a while.
         try await Task.detached(priority: .userInitiated) {
             try FileManager.default.copyItem(atPath: path, toPath: newPath)
@@ -152,7 +154,8 @@ final class LocalBackend: FileSystemBackend {
     }
 
     func rename(_ path: String, to newPath: String) async throws {
-        try FileManager.default.moveItem(atPath: path, toPath: newPath)
+        // Never replaces what is at `newPath`, even something that appeared since the listing.
+        try LocalFileOps.move(path, to: newPath)
     }
 
     func setMode(_ mode: UInt32, path: String) async throws {
