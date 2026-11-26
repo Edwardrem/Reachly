@@ -54,7 +54,7 @@ jobs:
           source .build/test-sshd/env.sh
           swift test --filter Live 2>&1 | tee "$RUNNER_TEMP/live.log" || {
             echo "::warning::live tests failed once; retrying one at a time"
-            swift test --filter Live --no-parallel 2>&1 | tee "$RUNNER_TEMP/live.log"
+            swift test --filter Live --no-parallel 2>&1 | tee -a "$RUNNER_TEMP/live.log"
           }
           Scripts/test-sshd.sh stop
           REPORT="$RUNNER_TEMP/tests.txt"
@@ -67,8 +67,8 @@ jobs:
             echo
             echo "All tests (the live SSH tests are skipped in this run; they run next against a throwaway sshd):"
             grep -E "Test run with [0-9]+ tests" "$RUNNER_TEMP/unit.log" | sed -E 's/^.*(Test run with)/  \1/'
-            echo "Live SSH tests:"
-            grep -E "Test run with [0-9]+ tests" "$RUNNER_TEMP/live.log" | tail -1 | sed -E 's/^.*(Test run with)/  \1/'
+            echo "Live SSH tests (run in parallel first and, if that fails, again one at a time; every attempt is listed):"
+            grep -E "Test run with [0-9]+ tests" "$RUNNER_TEMP/live.log" | sed -E 's/^.*(Test run with)/  \1/'
             echo
             echo "Every test, as module.suite/name:"
             swift test list 2>/dev/null | sort
