@@ -761,7 +761,7 @@ public final class SFTPClient: @unchecked Sendable {
         }
         if case .remote(path, let identity)? = claim.current {
             // The file an earlier attempt of this transfer made: continue it, or start it over, while it is still it.
-            if let reopened = try await reopenOwnUpload(path, identity: identity, from: localURL, resume: resume) { return reopened }
+            if let reopened = try await reopenOwnUpload(path, identity: identity, from: localURL, total: total, resume: resume) { return reopened }
             // Removed since: start again with a new file.
         }
         // Atomic on the server, and the requests are not abandoned when the task is cancelled, so the claim is
@@ -776,7 +776,12 @@ public final class SFTPClient: @unchecked Sendable {
     /// the open handle's fstat, must both fit `identity`, and the end of the confirmed bytes must read back as the
     /// same bytes of `localURL`. Resumes after the confirmed bytes, or empties the file to start over. Returns nil
     /// when nothing is at `path` any more; throws, touching nothing, when something else is.
-    private func reopenOwnUpload(_ path: String, identity: RemoteFileIdentity, from localURL: URL, resume: Bool) async throws -> (handle: [UInt8], offset: UInt64)? {
+    private func reopenOwnUpload(_ path: String, identity: RemoteFileIdentity, from localURL: URL, total: Int64, resume: Bool) async throws -> (handle: [UInt8], offset: UInt64)? {
+        // The check below compares the confirmed bytes with the file being sent; a file now shorter than them can't
+        // be compared, so the copy on the host is not touched.
+        guard identity.confirmed <= UInt64(total) else {
+            throw SFTP.Error.status(.failure, "The file on this Mac is now shorter than the part already sent, so the copy on the host was left as it is", path: path)
+        }
         do {
             guard identity.admits(try await lstat(path)) else { throw Self.alreadyExists(path) }
         } catch let error as SFTP.Error where error.isNoSuchFile {
@@ -793,9 +798,17 @@ public final class SFTPClient: @unchecked Sendable {
             guard identity.admits(opened), try await holdsWhatWasSent(handle, size: opened.size ?? 0, identity: identity, localURL: localURL) else {
                 throw Self.alreadyExists(path)
             }
-            if resume { return (handle, identity.confirmed) }
-            try await setAttributes(SFTP.Attributes(size: 0), handle: handle)
-            return (handle, 0)
+            guard resume else {
+                try await setAttributes(SFTP.Attributes(size: 0), handle: handle)
+                return (handle, 0)
+            }
+            // The upload rewrites everything after the confirmed bytes, but a longer file would keep a tail past the
+            // end of the file being sent (writes the server never confirmed, or a file that has shrunk since). Cut
+            // it off first; a server that refuses fails the upload.
+            if opened.size != identity.confirmed {
+                try await setAttributes(SFTP.Attributes(size: identity.confirmed), handle: handle)
+            }
+            return (handle, identity.confirmed)
         } catch {
             await closeQuietly(handle)
             throw error

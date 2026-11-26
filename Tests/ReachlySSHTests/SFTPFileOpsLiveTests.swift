@@ -572,6 +572,54 @@ struct SFTPFileOpsLiveTests {
         }
     }
 
+    @Test func aResumedUploadOfAFileThatShrankEndsWhereTheFileNowEnds() async throws {
+        try await withScratch { sftp, root in
+            try await Self.withLocalFolder { folder in
+                let local = folder.appending(path: "big.bin")
+                let original = Self.bytes(3 * 1024 * 1024 + 11, seed: 6)
+                try original.write(to: local)
+                let target = root + "/big.bin"
+
+                // The first attempt stops after its first batch.
+                let claim = SFTPClient.TargetClaim()
+                let first = Task {
+                    try await sftp.upload(local, to: target, overwrite: .never(claim)) { transferred, _ in
+                        if transferred > 0 { withUnsafeCurrentTask { $0?.cancel() } }
+                    }
+                }
+                #expect(await first.result.error is CancellationError)
+                let partial = Int(try #require(try await sftp.stat(target).size))
+
+                // The copy on the host holds more than was confirmed, as when writes in flight landed after the
+                // attempt stopped; and the file on this Mac has shrunk to a little past the confirmed part.
+                try await sftp.writeFile(original.prefix(partial) + Self.bytes(400 * 1024, seed: 9), to: target)
+                let shrunk = Data(original.prefix(partial + 1000))
+                try shrunk.write(to: local)
+
+                try await sftp.upload(local, to: target, resume: true, overwrite: .never(claim))
+                let copied = try await sftp.readFile(target)
+                #expect(copied.count == shrunk.count)
+                #expect(copied == shrunk)
+
+                // Shrunk below the part already sent, the file can't be checked: the retry fails and leaves the copy.
+                let second = SFTPClient.TargetClaim()
+                try await sftp.remove(target)
+                try original.write(to: local)
+                let again = Task {
+                    try await sftp.upload(local, to: target, overwrite: .never(second)) { transferred, _ in
+                        if transferred > 0 { withUnsafeCurrentTask { $0?.cancel() } }
+                    }
+                }
+                #expect(await again.result.error is CancellationError)
+                let sent = try await sftp.readFile(target)
+                try Data(original.prefix(1000)).write(to: local)
+                let error = await Self.error { try await sftp.upload(local, to: target, resume: true, overwrite: .never(second)) }
+                #expect(error?.localizedDescription.contains("shorter than the part already sent") == true, "\(String(describing: error))")
+                #expect(try await sftp.readFile(target) == sent)
+            }
+        }
+    }
+
     @Test func aRetryNeverWritesIntoAFileThatTookThePlaceOfItsOwn() async throws {
         try await withScratch { sftp, root in
             try await Self.withLocalFolder { folder in
