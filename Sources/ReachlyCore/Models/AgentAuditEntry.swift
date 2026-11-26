@@ -44,7 +44,9 @@ public enum AgentAuditDecision: String, Codable, Sendable, CaseIterable {
         }
     }
 
-    private static let commentMarker = "Comment: "
+    /// The labels inside a `changesRequestedDetail`, read back by `AgentAuditDetail`.
+    static let commentMarker = "Comment: "
+    static let suggestionMarker = "Suggested command: "
 
     /// The decision detail for `.changesRequested`: the guardrail reason, the
     /// suggested command when there is one, and the comment last, since it can
@@ -52,7 +54,7 @@ public enum AgentAuditDecision: String, Codable, Sendable, CaseIterable {
     public static func changesRequestedDetail(guardrail: String, comment: String, suggestion: String?) -> String {
         var lines: [String] = []
         if !guardrail.isEmpty { lines.append(guardrail) }
-        if let suggestion { lines.append("Suggested command: \(suggestion)") }
+        if let suggestion { lines.append(suggestionMarker + suggestion) }
         lines.append(commentMarker + comment)
         return lines.joined(separator: "\n")
     }
