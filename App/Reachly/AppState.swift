@@ -26,7 +26,10 @@ final class AppState {
     }
 
     enum SidebarMode: String, CaseIterable, Identifiable {
-        case hosts, snippets, history, ports
+        case hosts, snippets, history
+        /// Commands the AI assistant ran or proposed, from the agent audit log.
+        case aiHistory = "ai-history"
+        case ports
 
         var id: String { rawValue }
 
@@ -35,6 +38,7 @@ final class AppState {
             case .hosts: "Hosts"
             case .snippets: "Snippets"
             case .history: "History"
+            case .aiHistory: "AI History"
             case .ports: "Port Forwarding"
             }
         }
@@ -44,6 +48,7 @@ final class AppState {
             case .hosts: "server.rack"
             case .snippets: "text.badge.star"
             case .history: "clock.arrow.circlepath"
+            case .aiHistory: "wand.and.sparkles"
             case .ports: "arrow.left.arrow.right"
             }
         }
@@ -103,6 +108,7 @@ final class AppState {
     var snippetRun: SnippetRun?
     var folderEditor: SnippetFolder?? // nil: closed; .some(nil): new folder; .some(folder): rename
     var isConfirmingClearHistory = false
+    var isConfirmingClearAIHistory = false
     var isExporting = false
     var isExportingSSHConfig = false
     /// Set by the File menu, the Dock/Finder, or Settings; `ContentView` starts the flow.

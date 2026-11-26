@@ -1,6 +1,7 @@
 #if DEBUG
 import Foundation
 import SwiftData
+import ReachlyAgent
 import ReachlyCore
 import ReachlySSH
 
@@ -43,6 +44,7 @@ enum DemoData {
             context.insert(PortForwardRule(name: "Expose dev server", kind: .remote, bindAddress: "0.0.0.0", bindPort: 8080, targetHost: "localhost", targetPort: 3000, host: production))
             group.defaultJumpHost = bastion
             group.themeID = "builtin:gruvbox-dark"
+            seedAuditLog(buildBox: buildBox, bastion: bastion, production: production, in: context)
         } catch {
             print("DemoData: \(error)")
         }
@@ -80,6 +82,41 @@ enum DemoData {
             }
         }
         try? context.save()
+    }
+
+    /// Two days of agent activity for the AI History sidebar: every decision, both
+    /// sources, a failed command, and commands that link back to a saved conversation.
+    private static func seedAuditLog(buildBox: SSHHost, bastion: SSHHost, production: SSHHost, in context: ModelContext) {
+        let messages: [AgentMessage] = [
+            .user("Why is the disk on build-box filling up?"),
+            AgentMessage(role: .assistant, blocks: [.text("The root volume is at 91%. Most of it is 18 GB of nginx access logs that are not rotated, and an 11 GB proxy cache.")], model: "claude-opus-5-5"),
+        ]
+        let conversation = AgentConversation(title: "Why is the disk on build-box filling up?", hostID: buildBox.uuid, transcript: (try? AgentTranscript.encode(messages)) ?? Data(), model: "claude-opus-5-5")
+        context.insert(conversation)
+        let now = Date.now
+        func add(_ minutesAgo: Double, _ host: SSHHost, _ command: String, reason: String, _ decision: AgentAuditDecision, detail: String = "", proposed: String? = nil, exit: Int? = nil, milliseconds: Int? = nil, output: String = "", source: AgentActionSource = .agentPanel) {
+            let target = host.port == 22 ? "\(host.username)@\(host.hostname)" : "\(host.username)@\(host.hostname):\(host.port)"
+            context.insert(AgentAuditEntry(
+                timestamp: now.addingTimeInterval(-minutesAgo * 60), source: source, hostID: host.uuid, hostName: host.name, hostTarget: target,
+                tool: "run_command", command: command, proposedCommand: proposed, reason: reason, decision: decision, decisionDetail: detail,
+                exitStatus: exit, durationMilliseconds: milliseconds, outputExcerpt: output,
+                conversationID: source == .agentPanel && host === buildBox ? conversation.uuid : nil))
+        }
+        add(4, buildBox, "df -h / /data", reason: "See which volume is full", .autoAllowed, detail: "Read-only command.", exit: 0, milliseconds: 412,
+            output: "Filesystem      Size  Used Avail Use% Mounted on\n/dev/sda1        80G   73G  7.0G  91% /\n/dev/sdb1       500G  212G  288G  42% /data")
+        add(3, buildBox, "sudo du -xsh /var/log/nginx /var/cache/nginx", reason: "Find what fills the root volume", .approved, detail: "This host asks before every command.", exit: 0, milliseconds: 2_310,
+            output: "18G\t/var/log/nginx\n11G\t/var/cache/nginx")
+        add(2, buildBox, "rm -rf /var/cache/nginx/*", reason: "Clear the stale proxy cache", .changesRequested,
+            detail: AgentAuditDecision.changesRequestedDetail(guardrail: "Destructive pattern (rm with -r or -f): always asks, whatever the host's permission mode.", comment: "Keep the cache. Rotate the logs instead.", suggestion: nil))
+        add(1, buildBox, "sudo logrotate -f /etc/logrotate.d/nginx", reason: "Rotate the nginx logs", .edited, detail: "This host asks before every command.",
+            proposed: "sudo logrotate -f /etc/logrotate.conf", exit: 0, milliseconds: 1_204)
+        add(40, production, "systemctl restart nginx", reason: "Apply the new config", .blocked, detail: "example.org is read-only for the assistant.", source: .mcp)
+        add(55, bastion, "journalctl -u sshd --since today | tail -n 20", reason: "Check for failed logins", .autoAllowed, detail: "Read-only command.", exit: 0, milliseconds: 860,
+            output: "Nov 26 06:12:01 bastion sshd[1182]: Accepted publickey for jump from 203.0.113.7 port 51022", source: .mcp)
+        add(26 * 60, buildBox, "sudo apt-get upgrade -y", reason: "Install security updates", .denied, detail: "This host asks before every command.")
+        add(27 * 60, buildBox, "cat /etc/nginx/sites-enabled/default", reason: "Read the site config", .approved, detail: "This host asks before every command.", exit: 1, milliseconds: 95,
+            output: "stderr: cat: /etc/nginx/sites-enabled/default: No such file or directory")
+        add(28 * 60, bastion, "sleep 600", reason: "Wait for the deploy", .cancelled, detail: "This host asks before every command.", milliseconds: 4_000, output: "failed: The action was cancelled.", source: .mcp)
     }
 }
 #endif

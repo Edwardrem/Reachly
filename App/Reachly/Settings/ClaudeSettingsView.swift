@@ -347,22 +347,15 @@ struct AgentAuditLogSection: View {
     }
 
     private func export() {
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = "Reachly-agent-audit-\(Date.now.formatted(.iso8601.year().month().day())).json"
-        panel.allowedContentTypes = [.json]
-        guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            let data = try AgentAuditRecord.exportJSON(entries.map(AgentAuditRecord.init))
-            try data.write(to: url, options: [.atomic])
-            message = "Exported \(entries.count) entries."
+            if let count = try AgentAuditLog.exportJSON(from: modelContext) { message = AgentAuditLog.exportMessage(count: count) }
         } catch {
             message = error.localizedDescription
         }
     }
 
     private func clear() {
-        for entry in entries { modelContext.delete(entry) }
-        try? modelContext.save()
+        AgentAuditLog.clear(in: modelContext)
         message = "Audit log cleared."
     }
 }
@@ -373,7 +366,7 @@ private struct AgentAuditRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
-                Image(systemName: icon).foregroundStyle(color)
+                Image(systemName: entry.decision.symbolName).foregroundStyle(entry.decision.tint)
                 Text(entry.hostName).fontWeight(.medium)
                 Text(entry.tool).font(.caption.monospaced()).foregroundStyle(.secondary)
                 Text(entry.source == .mcp ? "MCP" : "panel").font(.caption2).padding(.horizontal, 4).background(.quaternary, in: Capsule())
@@ -394,26 +387,5 @@ private struct AgentAuditRow: View {
             }
         }
         .padding(.vertical, 2)
-    }
-
-    private var icon: String {
-        switch entry.decision {
-        case .autoAllowed: "checkmark.circle"
-        case .approved: "hand.thumbsup"
-        case .edited: "pencil.circle"
-        case .denied: "hand.raised"
-        case .blocked: "nosign"
-        case .cancelled: "stop.circle"
-        case .changesRequested: "text.bubble"
-        }
-    }
-
-    private var color: Color {
-        switch entry.decision {
-        case .autoAllowed, .approved, .edited: .green
-        case .denied, .blocked: .red
-        case .cancelled: .orange
-        case .changesRequested: .blue
-        }
     }
 }
