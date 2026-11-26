@@ -561,6 +561,17 @@ private struct DictationMeterView: View {
 
 /// The conversation, kept at its end while a reply comes in.
 ///
+/// The rows are in a plain `VStack`, not a `LazyVStack`. A lazy stack guesses
+/// the height of rows it has not measured, and in a long conversation, when the
+/// guesses change under a scroll to the end (a row settling, a sheet opening
+/// over the window), it can leave the visible area where it has no rows and
+/// draw nothing until the next scroll. Measuring every row keeps the content
+/// height and the end exact. Laying the rows out costs more the longer the
+/// conversation, so the reply coming in is shown at most ten times a second
+/// (see `AgentStreamingView`) rather than on every streamed piece, and rows are
+/// `Equatable` and get only their own tool results, so a new message redraws
+/// that message and not the whole history.
+///
 /// Following is driven by the scroll geometry, not by the session's streaming
 /// properties: whenever the content grows (reasoning, text, a tool call, the
 /// final message replacing the streamed one, a row height settling), the view
@@ -581,23 +592,12 @@ struct AgentTranscriptView: View {
 
     private static let endID = "transcript-end"
 
-    private var toolResults: [String: (content: String, isError: Bool)] {
-        var results: [String: (String, Bool)] = [:]
-        for message in session.messages {
-            for block in message.blocks {
-                if case .toolResult(let id, let content, let isError) = block { results[id] = (content, isError) }
-            }
-        }
-        return results
-    }
-
     var body: some View {
-        let results = toolResults
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 16) {
-                    ForEach(session.messages) { message in
-                        AgentMessageView(message: message, results: results)
+                VStack(alignment: .leading, spacing: 16) {
+                    if !session.messages.isEmpty {
+                        TranscriptHistory(messages: session.messages)
                     }
                     if session.isRunning {
                         AgentStreamingView(session: session)
@@ -694,6 +694,43 @@ struct AgentTranscriptView: View {
     }
 }
 
+/// The finished messages. Its body runs only when they change, not on each streamed piece.
+private struct TranscriptHistory: View {
+    let messages: [AgentMessage]
+
+    private var toolResults: [String: ToolCallResult] {
+        var results: [String: ToolCallResult] = [:]
+        for message in messages {
+            for block in message.blocks {
+                if case .toolResult(let id, let content, let isError) = block {
+                    results[id] = ToolCallResult(content: content, isError: isError)
+                }
+            }
+        }
+        return results
+    }
+
+    /// The results of this message's own tool calls.
+    private static func results(for message: AgentMessage, in all: [String: ToolCallResult]) -> [String: ToolCallResult] {
+        guard message.role == .assistant else { return [:] }
+        var mine: [String: ToolCallResult] = [:]
+        for block in message.blocks {
+            if case .toolUse(let id, _, _) = block, let result = all[id] { mine[id] = result }
+        }
+        return mine
+    }
+
+    var body: some View {
+        let results = toolResults
+        VStack(alignment: .leading, spacing: 16) {
+            ForEach(messages) { message in
+                AgentMessageView(message: message, results: Self.results(for: message, in: results))
+                    .equatable()
+            }
+        }
+    }
+}
+
 /// Where the transcript is scrolled: rounded so that sub-point layout noise
 /// does not count as a change.
 private struct TranscriptScrollMetrics: Equatable {
@@ -770,10 +807,22 @@ private final class TranscriptFollower {
     }
 }
 
-private struct AgentMessageView: View {
+/// A tool call's result, shown with the call.
+private struct ToolCallResult: Equatable {
+    let content: String
+    let isError: Bool
+}
+
+/// Equatable on what it shows, so the transcript redraws a row only when its
+/// message or its tool calls' results change.
+private struct AgentMessageView: View, Equatable {
     let message: AgentMessage
-    let results: [String: (content: String, isError: Bool)]
+    let results: [String: ToolCallResult]
     @Environment(\.palette) private var palette
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.message == rhs.message && lhs.results == rhs.results
+    }
 
     var body: some View {
         if message.role == .user {
@@ -917,13 +966,26 @@ private struct MessageActions: View {
     }
 }
 
+/// The reply still coming in, refreshed at most every `interval`.
+///
+/// Every refresh lays the whole transcript out again, so following each
+/// streamed piece (dozens a second) would keep the main thread busy in a long
+/// conversation. A task copies the session's streaming state into `shown` on
+/// the interval instead; the body reads only that copy, so the pieces in
+/// between redraw nothing. When a message has landed since the copy was taken,
+/// the body reads the session directly, so text that has just moved into the
+/// transcript is never shown twice.
 private struct AgentStreamingView: View {
     let session: AgentSession
+    @State private var shown = StreamingSnapshot()
+
+    private static let interval: Duration = .milliseconds(100)
 
     var body: some View {
+        let current = shown.messageCount == session.messages.count ? shown : StreamingSnapshot(session)
         VStack(alignment: .leading, spacing: 8) {
             // An external agent's finished blocks, in the order they came.
-            ForEach(Array(session.streamingBlocks.enumerated()), id: \.offset) { _, block in
+            ForEach(Array(current.blocks.enumerated()), id: \.offset) { _, block in
                 switch block {
                 case .text(let text):
                     MarkdownText(text)
@@ -939,13 +1001,40 @@ private struct AgentStreamingView: View {
                     EmptyView()
                 }
             }
-            if !session.streamingThinking.isEmpty {
-                ThinkingView(text: session.streamingThinking, expanded: true)
+            if !current.thinking.isEmpty {
+                ThinkingView(text: current.thinking, expanded: true)
             }
-            if !session.streamingText.isEmpty {
-                MarkdownText(session.streamingText)
+            if !current.text.isEmpty {
+                MarkdownText(current.text)
             }
         }
+        .task(id: ObjectIdentifier(session)) {
+            while !Task.isCancelled {
+                // Read here, outside the body, so the pieces are not observed.
+                let live = StreamingSnapshot(session)
+                if live != shown { shown = live }
+                try? await Task.sleep(for: Self.interval)
+            }
+        }
+    }
+}
+
+/// A copy of the session's streaming state, and how many messages it had then.
+private struct StreamingSnapshot: Equatable {
+    var blocks: [AgentContentBlock] = []
+    var thinking = ""
+    var text = ""
+    /// -1 until the first copy, so the first body reads the session.
+    var messageCount = -1
+
+    init() {}
+
+    @MainActor
+    init(_ session: AgentSession) {
+        blocks = session.streamingBlocks
+        thinking = session.streamingThinking
+        text = session.streamingText
+        messageCount = session.messages.count
     }
 }
 
@@ -1266,7 +1355,7 @@ private struct ThinkingView: View {
 private struct ToolCallView: View {
     let name: String
     let input: JSONValue
-    let result: (content: String, isError: Bool)?
+    let result: ToolCallResult?
     @Environment(\.palette) private var palette
     @State private var isExpanded = false
 

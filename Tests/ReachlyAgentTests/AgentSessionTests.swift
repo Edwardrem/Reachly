@@ -47,6 +47,25 @@ struct AgentSessionTests {
         #expect(session.lastError == nil)
     }
 
+    @Test func aReplyIsNotStillStreamingWhileItsToolsRun() async {
+        final class Seen { var streaming: [String]? }
+        let seen = Seen()
+        let host = FakeToolHost(hosts: [FakeToolHost.web])
+        let (session, _) = makeSession(host, responses: [
+            FakeProvider.toolCall(.runCommand, ["host": "web-01", "command": "df -h", "reason": "check disk"], text: "Let me look."),
+            FakeProvider.reply("Disk is fine."),
+        ])
+        host.approval = { [weak session] _ in
+            seen.streaming = [session?.streamingThinking ?? "?", session?.streamingText ?? "?"]
+            return .approved
+        }
+        session.send("is web-01 low on disk?")
+        await waitUntilDone(session)
+
+        #expect(session.messages[1].text == "Let me look.")
+        #expect(seen.streaming == ["", ""], "the reply waiting on approval is shown once, in the transcript")
+    }
+
     @Test func readOnlyHostBlocksWithoutAsking() async {
         let host = FakeToolHost(hosts: [FakeToolHost.db])
         let (session, _) = makeSession(host, responses: [

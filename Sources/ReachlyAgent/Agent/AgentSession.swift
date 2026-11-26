@@ -320,6 +320,10 @@ public final class AgentSession {
             }
             let reply = Self.boundingCutOffInputs(normalised)
             append(reply)
+            // The reply is in the transcript now; left here it would show a
+            // second time below it while its tools run.
+            streamingText = ""
+            streamingThinking = ""
             lastModel = response.model
             servedByFallback = response.servedByFallback
             usage.inputTokens += response.usage.inputTokens
