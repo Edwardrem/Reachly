@@ -61,6 +61,7 @@ struct ReachlyApp: App {
                     appDelegate.appState = appState
                     appDelegate.forwarding = forwarding
                     appDelegate.themes = themes
+                    appDelegate.agent = agent
                 }
                 .sheet(item: Bindable(updates).availableUpdate) { item in
                     UpdateAvailableView(item: item)
@@ -274,6 +275,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var appState: AppState?
     var forwarding: PortForwardingManager?
     var themes: ThemeStore?
+    var agent: AgentPanelController?
 
     /// Double-clicked or dropped `.reachly` files, theme JSON files, and `reachly://theme?url=` links
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -320,6 +322,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated {
+            // Qoder in the chat panel, and the MCP bridges it started, go with the app.
+            agent?.stopExternalAgent()
             MCPBridgeConfig.remove()
             guard let workspace else { return }
             try? workspace.snapshot().save()

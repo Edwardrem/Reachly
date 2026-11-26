@@ -138,8 +138,10 @@ conversations. Your real hosts never leave your Mac.
   Qoder's own settings, with your user's access, and Qoder decides when to
   ask: Reachly starts it with `--permission-mode default` (the mode Qoder's
   docs say asks before sensitive actions), and when Qoder asks, Reachly shows
-  its options in a sheet, and closing it rejects. The working folder is not a
-  sandbox. Stop sends `session/cancel`; a crash leaves a failure row with
+  its options in a sheet, each saying whether it allows or rejects, and
+  closing it rejects. The working folder is not a sandbox. Quitting Reachly
+  stops Qoder and the bridges it started, and a Qoder that floods updates is
+  made to wait instead of filling Reachly's memory. Stop sends `session/cancel`; a crash leaves a failure row with
   Retry. However a reply ends (answered, stopped, failed, Qoder gone), the
   sheets it was waiting on go, and a command it asks for after that gets no
   sheet. Each conversation keeps its Qoder session, and a restarted Qoder

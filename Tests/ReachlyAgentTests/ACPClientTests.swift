@@ -944,6 +944,40 @@ struct ACPAgentProcessTests {
         }
     }
 
+    @Test func aFloodingAgentWaitsForTheReaderToCatchUp() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "reachly-acp-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let process = try ACPProcess(executable: FakeACPAgentTool.path, arguments: [], environment: ["FAKE_ACP_SCENARIO": "flood"], currentDirectory: directory, backlogLimit: .init(messages: 50, bytes: 1 << 20))
+        var messages = 0
+        for await event in process.events {
+            guard case .message(let line) = event else { continue }
+            messages += 1
+            // A reader slower than the agent.
+            if messages % 250 == 0 { try? await Task.sleep(for: .milliseconds(20)) }
+            process.didHandle(byteCount: line.count)
+        }
+        #expect(messages == 5000, "nothing is dropped")
+        #expect(process.backlogHighWater <= 50, "the agent waited instead of piling up \(process.backlogHighWater) messages")
+    }
+
+    @Test func aReaderThatGoesAwayDoesNotHoldTheAgentUp() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "reachly-acp-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let process = try ACPProcess(executable: FakeACPAgentTool.path, arguments: [], environment: ["FAKE_ACP_SCENARIO": "flood"], currentDirectory: directory, backlogLimit: .init(messages: 5, bytes: 1 << 20))
+        let pid = process.pid
+        var connection: ACPConnection? = ACPConnection(transport: process)
+        var seen = 0
+        connection?.onNotification = { _, _ in seen += 1 }
+        await waitFor { seen >= 5 }
+        // Let go of mid-flood: the agent, blocked writing to a full backlog, is stopped rather than left waiting.
+        connection = nil
+        await waitFor { kill(pid, 0) != 0 }
+        #expect(kill(pid, 0) != 0, "the agent is gone and was reaped")
+        #expect(connection == nil)
+    }
+
     @Test func aSecondTurnWhileOneRunsIsRefused() async throws {
         let run = FakeACPRun("slow")
         defer { run.finish() }

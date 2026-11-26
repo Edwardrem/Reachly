@@ -63,6 +63,12 @@ enum FakeACPAgent {
             FileHandle.standardError.write(Data("error: unknown option '--permission-mode'\n".utf8))
             exit(1)
         }
+        if scenario == "flood" {
+            // Thousands of updates before anything is asked, then it exits.
+            let line = Data(("{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"pad\":\"" + String(repeating: "x", count: 1000) + "\"}}\n").utf8)
+            for _ in 0..<5000 { FileHandle.standardOutput.write(line) }
+            exit(0)
+        }
         if scenario == "init-crash" {
             // Dies before it answers anything, with nothing about its arguments.
             FileHandle.standardError.write(Data("panic: the config file is broken\n".utf8))
