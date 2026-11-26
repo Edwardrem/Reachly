@@ -20,7 +20,7 @@ final class CollectingSink: TerminalSink {
 }
 
 @MainActor
-func waitUntil(_ what: String, timeout: Duration = .seconds(10), _ condition: @MainActor () -> Bool) async throws {
+func waitUntil(_ what: String, timeout: Duration = .seconds(30), _ condition: @MainActor () -> Bool) async throws {
     let deadline = ContinuousClock.now + timeout
     while ContinuousClock.now < deadline {
         if condition() { return }

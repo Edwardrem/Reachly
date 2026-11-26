@@ -299,10 +299,23 @@ final class MemoryTransport: ACPTransport {
     }
 }
 
+/// Waits until `condition` holds, for up to `timeout` by the clock. Use it rather than a fixed number of short
+/// sleeps: on a loaded CI runner the test's own sleeps on the main actor come round on time while the work it
+/// waits for sits on a busy shared pool, so 400 × 5 ms can run out before that work has started. The generous
+/// default costs nothing when the condition holds sooner.
 @MainActor
-func waitFor(_ timeout: Duration = .seconds(10), _ condition: () -> Bool) async {
+func waitFor(_ timeout: Duration = .seconds(30), _ condition: () -> Bool) async {
     let deadline = ContinuousClock.now + timeout
     while !condition(), ContinuousClock.now < deadline {
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+}
+
+/// `waitFor` for a condition that has to be awaited, such as an actor's flag.
+@MainActor
+func waitForAsync(_ timeout: Duration = .seconds(30), _ condition: () async -> Bool) async {
+    let deadline = ContinuousClock.now + timeout
+    while !(await condition()), ContinuousClock.now < deadline {
         try? await Task.sleep(for: .milliseconds(10))
     }
 }

@@ -14,7 +14,7 @@ struct ApprovalFeedbackTests {
     }
 
     private func waitUntilDone(_ session: AgentSession) async {
-        for _ in 0..<400 where session.isRunning { try? await Task.sleep(for: .milliseconds(10)) }
+        await waitFor { !session.isRunning }
         #expect(!session.isRunning)
     }
 

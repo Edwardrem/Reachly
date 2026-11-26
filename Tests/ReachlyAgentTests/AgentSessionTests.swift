@@ -14,7 +14,7 @@ struct AgentSessionTests {
     }
 
     private func waitUntilDone(_ session: AgentSession) async {
-        for _ in 0..<400 where session.isRunning { try? await Task.sleep(for: .milliseconds(10)) }
+        await waitFor { !session.isRunning }
         #expect(!session.isRunning)
     }
 
@@ -198,7 +198,7 @@ struct AgentSessionTests {
             FakeProvider.reply("never reached"),
         ])
         session.send("go")
-        for _ in 0..<200 where host.approvalRequests.isEmpty { try? await Task.sleep(for: .milliseconds(5)) }
+        await waitFor { !host.approvalRequests.isEmpty }
         session.stop()
         await waitUntilDone(session)
         #expect(host.executed.isEmpty)

@@ -614,10 +614,7 @@ struct TranscriptRepairTests {
         let session = AgentSession(provider: provider, systemPrompt: "sys", toolRunner: AgentToolRunner(host: host, source: .agentPanel))
 
         session.send("old question")
-        for _ in 0..<400 {
-            if await toolStarted.isSet { break }
-            try? await Task.sleep(for: .milliseconds(5))
-        }
+        await waitForAsync { await toolStarted.isSet }
         let started = await toolStarted.isSet
         #expect(started)
         #expect(provider.requests.count == 1)
@@ -728,7 +725,7 @@ struct TranscriptRepairTests {
         let session = AgentSession(provider: provider, systemPrompt: "sys", toolRunner: AgentToolRunner(host: host, source: .agentPanel))
 
         session.send("old question")
-        for _ in 0..<400 where session.streamingText.isEmpty { try? await Task.sleep(for: .milliseconds(5)) }
+        await waitFor { !session.streamingText.isEmpty }
         #expect(!session.streamingText.isEmpty)
 
         var saves = 0
@@ -740,10 +737,7 @@ struct TranscriptRepairTests {
         #expect(saves == 0)
 
         await gate.open()
-        for _ in 0..<400 {
-            if await streamEnded.isSet { break }
-            try? await Task.sleep(for: .milliseconds(5))
-        }
+        await waitForAsync { await streamEnded.isSet }
         let ended = await streamEnded.isSet
         #expect(ended)
         try? await Task.sleep(for: .milliseconds(50))
@@ -774,7 +768,7 @@ struct TranscriptRepairTests {
         let session = AgentSession(provider: provider, systemPrompt: "sys", toolRunner: AgentToolRunner(host: host, source: .agentPanel))
 
         session.send("old question")
-        for _ in 0..<400 where host.approvalRequests.isEmpty { try? await Task.sleep(for: .milliseconds(5)) }
+        await waitFor { !host.approvalRequests.isEmpty }
         #expect(host.approvalRequests.count == 1)
 
         var saves = 0
@@ -785,10 +779,7 @@ struct TranscriptRepairTests {
         #expect(session.messages == AgentTranscript.repaired(replacement))
         #expect(saves == 0)
 
-        for _ in 0..<400 {
-            if await approvalExited.isSet { break }
-            try? await Task.sleep(for: .milliseconds(5))
-        }
+        await waitForAsync { await approvalExited.isSet }
         let exited = await approvalExited.isSet
         #expect(exited)
         try? await Task.sleep(for: .milliseconds(50))
@@ -805,7 +796,7 @@ struct TranscriptRepairTests {
     }
 
     private func waitUntilDone(_ session: AgentSession) async {
-        for _ in 0..<400 where session.isRunning { try? await Task.sleep(for: .milliseconds(10)) }
+        await waitFor { !session.isRunning }
         #expect(!session.isRunning)
     }
 }

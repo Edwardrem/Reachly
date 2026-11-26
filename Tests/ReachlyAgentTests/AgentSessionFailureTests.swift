@@ -13,7 +13,7 @@ struct AgentSessionFailureTests {
     }
 
     private func waitUntilDone(_ session: AgentSession) async {
-        for _ in 0..<400 where session.isRunning { try? await Task.sleep(for: .milliseconds(10)) }
+        await waitFor { !session.isRunning }
         #expect(!session.isRunning)
     }
 
@@ -140,17 +140,17 @@ struct AgentSessionFailureTests {
         #expect(session.canRetry)
     }
 
-    @Test func stopKeepsTheStreamedReplyAndAddsARow() async {
+    @Test func stopKeepsTheStreamedReplyAndAddsARow() async throws {
         let provider = FakeProvider(responses: [FakeProvider.reply("Root is at 91%"), FakeProvider.reply("Root is at 91%, /data at 42%.")])
         provider.holdBeforeDone = { try? await Task.sleep(for: .seconds(2)) }
         let session = makeSession(provider)
 
         session.send("check the disk")
-        for _ in 0..<400 where !session.streamingText.contains("91%") { try? await Task.sleep(for: .milliseconds(5)) }
+        await waitFor { session.streamingText.contains("91%") }
         session.stop()
         await waitUntilDone(session)
 
-        #expect(session.messages.count == 3)
+        try #require(session.messages.count == 3, "the stop came before the reply streamed")
         #expect(session.messages[1].role == .assistant)
         #expect(session.messages[1].failure == nil, "streamed text is a reply the model sees next time, as before")
         #expect(session.messages[1].text.hasPrefix("Root is at 91%"))
