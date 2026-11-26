@@ -47,9 +47,11 @@ let package = Package(
             ]
         ),
         .executableTarget(name: "reachly-mcp"),
+        // A scripted ACP agent the tests launch as a process in place of a real one such as Qoder.
+        .executableTarget(name: "fake-acp-agent", path: "Tests/FakeACPAgent"),
         .testTarget(name: "ReachlyCoreTests", dependencies: ["ReachlyCore"]),
         .testTarget(name: "ReachlySSHTests", dependencies: ["ReachlySSH"]),
         .testTarget(name: "ReachlyTerminalTests", dependencies: ["ReachlyTerminal", "ReachlySSH", "ReachlyCore"]),
-        .testTarget(name: "ReachlyAgentTests", dependencies: ["ReachlyAgent", "ReachlyTerminal", "ReachlySSH", "ReachlyCore"]),
+        .testTarget(name: "ReachlyAgentTests", dependencies: ["ReachlyAgent", "ReachlyTerminal", "ReachlySSH", "ReachlyCore", "fake-acp-agent"]),
     ]
 )

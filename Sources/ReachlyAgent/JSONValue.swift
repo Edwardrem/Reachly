@@ -102,7 +102,7 @@ public enum JSONValue: Codable, Hashable, Sendable {
 
     public func data(pretty: Bool = false) -> Data {
         let encoder = JSONEncoder()
-        encoder.outputFormatting = pretty ? [.prettyPrinted, .sortedKeys] : [.sortedKeys]
+        encoder.outputFormatting = pretty ? [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes] : [.sortedKeys]
         return (try? encoder.encode(self)) ?? Data("null".utf8)
     }
 
