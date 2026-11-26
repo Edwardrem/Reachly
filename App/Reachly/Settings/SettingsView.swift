@@ -2,21 +2,28 @@ import Observation
 import SwiftUI
 import ReachlyTerminal
 
-/// A Settings tab another window asked for, such as the setup sheet's "Open AI Integration".
+/// The Settings pane on screen, shared so other windows can open Settings on a given pane.
 @MainActor
 @Observable
-final class SettingsRouter {
-    static let shared = SettingsRouter()
-    var requestedTab: String?
+final class SettingsNavigation {
+    static let shared = SettingsNavigation()
+    static let aiIntegration = "ai-integration"
+
+    var tab = SettingsView.initialTab
+
+    /// Opens Settings on a pane, or switches the open Settings window to it.
+    func show(_ tab: String, using openSettings: OpenSettingsAction) {
+        self.tab = tab
+        openSettings()
+    }
 }
 
 struct SettingsView: View {
-    @State private var tab = SettingsView.initialTab
-    @State private var router = SettingsRouter.shared
+    @Bindable private var navigation = SettingsNavigation.shared
 
     /// Debug builds take `--settings-tab=<name>` (general, appearance, security, known-hosts, data,
     /// ai-integration, cloud, updates) so a UI check can open Settings on one pane.
-    private static var initialTab: String {
+    fileprivate static var initialTab: String {
         #if DEBUG
         if let argument = CommandLine.arguments.first(where: { $0.hasPrefix("--settings-tab=") }) {
             return String(argument.dropFirst("--settings-tab=".count))
@@ -26,7 +33,7 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        TabView(selection: $tab) {
+        TabView(selection: $navigation.tab) {
             GeneralSettingsView()
                 .tabItem { Label("General", systemImage: "gearshape") }
                 .tag("general")
@@ -44,7 +51,7 @@ struct SettingsView: View {
                 .tag("data")
             ClaudeSettingsView()
                 .tabItem { Label("AI Integration", systemImage: "sparkles") }
-                .tag("ai-integration")
+                .tag(SettingsNavigation.aiIntegration)
             CloudSettingsView()
                 .tabItem { Label("Cloud", systemImage: "cloud") }
                 .tag("cloud")
@@ -53,14 +60,6 @@ struct SettingsView: View {
                 .tag("updates")
         }
         .frame(width: 620)
-        .onAppear(perform: showRequestedTab)
-        .onChange(of: router.requestedTab) { _, _ in showRequestedTab() }
-    }
-
-    private func showRequestedTab() {
-        guard let requested = router.requestedTab else { return }
-        tab = requested
-        router.requestedTab = nil
     }
 }
 

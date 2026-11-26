@@ -81,6 +81,9 @@ conversations. Your real hosts never leave your Mac.
   integration (OSC 133 hooks for bash and zsh) records every command with its
   exit status into a searchable global **History** (⌘Y), and inline
   **suggestions** complete from history and snippets while typing.
+  **AI History** (⌥⌘Y) lists every command the assistant ran or proposed, from
+  the panel and from MCP clients, by day with the decision, host, exit status,
+  reason and output; run one again, save it as a snippet or open its conversation.
 - **Port forwarding** (⌘⇧P): local, remote and dynamic (SOCKS5) rules tied
   to a host. Rules start with one click or automatically when the host
   connects, show live status, byte counts and open connections, and keep
@@ -318,7 +321,7 @@ shell-integration hooks and check host-key handling against a throwaway sshd.
 For manual QA against scratch data, launch the Debug build with
 `REACHLY_DATA_DIR=/some/dir REACHLY_KEYCHAIN_SERVICE=io.github.edwardrem.reachly.qa` and the
 arguments `--seed-demo --window=identities`. Debug builds also take
-`--sidebar=hosts|snippets|history|ports`,
+`--sidebar=hosts|snippets|history|ai-history|ports`,
 `--window=identities|settings|export|ssh-config-export|agent|ports|cloud-import|theme-editor|sftp|new-host|ai-setup`,
 `--qa-new-host=<user@host:port>` (the editor, prefilled), `--qa-edit-host=<name>`,
 `--connect=<host name>`, `--qa-type=<text>`, `--qa-approval`, `--qa-agent-demo`

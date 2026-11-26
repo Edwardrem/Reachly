@@ -61,13 +61,59 @@ public struct AgentApprovalRequest: Sendable, Identifiable {
         self.detail = detail
         self.isDestructive = isDestructive
     }
+
+    /// Whether the user can edit `command`. Only run_command's text is the
+    /// tool's real input. The other tools show a stand-in line (`cat > path  #
+    /// upload 12 bytes from …`): editing it would not change what runs, and
+    /// passing it back could lead the model to run it as a command. So for them
+    /// the sheet shows it read-only, offers no Run Edited Command, sends a
+    /// comment alone, and the runner refuses an `.edited` answer.
+    public var isCommandEditable: Bool { tool == AgentToolName.runCommand.rawValue }
 }
 
 public enum AgentApprovalResponse: Sendable, Equatable {
     case approved
-    /// The user changed the command; the new text runs instead.
+    /// The user changed the command; the new text runs instead. Only for
+    /// requests whose command is editable (`isCommandEditable`).
     case edited(String)
+    /// The user wants changes before anything runs. Nothing runs: the model
+    /// gets the comment (and the edited command as a suggestion, when there is
+    /// one) and can call the tool again with a revised command.
+    case requestChanges(comment: String, editedCommand: String?)
     case denied
+
+    /// The longest comment the approval sheet sends, in characters.
+    public static let commentLimit = 2_000
+
+    /// The comment as it is sent: trimmed and clipped to `commentLimit`.
+    /// Nil when nothing is left, so an empty comment can't be sent.
+    public static func normalizedComment(_ text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return String(trimmed.prefix(commentLimit)).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The sheet's Send answer for a comment and the command as it stands in
+    /// the editor. The edit is kept only when `includingEdit` (see
+    /// `AgentApprovalRequest.isCommandEditable`) and it differs from the
+    /// proposal by more than surrounding whitespace. Nil when the comment is empty.
+    public static func changeRequest(comment: String, command: String, proposed: String, includingEdit: Bool = true) -> AgentApprovalResponse? {
+        guard let comment = normalizedComment(comment) else { return nil }
+        return .requestChanges(comment: comment, editedCommand: includingEdit ? suggestion(command, proposed: proposed) : nil)
+    }
+
+    /// The edited command this answer passes back to the model, if any.
+    public var suggestedCommand: String? {
+        if case .requestChanges(_, let edited) = self { return edited }
+        return nil
+    }
+
+    /// The edited command worth passing back, or nil when it is empty or unchanged.
+    static func suggestion(_ edited: String?, proposed: String) -> String? {
+        guard let trimmed = edited?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty,
+              trimmed != proposed.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+        return trimmed
+    }
 }
 
 /// What a command produced.

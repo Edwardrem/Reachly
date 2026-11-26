@@ -185,7 +185,8 @@ struct AgentSessionTests {
         #expect(host.executed.isEmpty)
         #expect(session.lastError == "Stopped.")
         #expect(host.auditRecords.map(\.decision) == [.cancelled])
-        guard case .toolResult(_, _, let isError)? = session.messages.last?.blocks.first else { Issue.record("transcript ends with the tool result"); return }
+        #expect(session.messages.last?.blocks == [.failure(AgentFailure(kind: .stopped, message: "Stopped."))], "the stop is recorded where it happened")
+        guard case .toolResult(_, _, let isError)? = session.messages.dropLast().last?.blocks.first else { Issue.record("the tool result comes just before the stop"); return }
         #expect(isError)
         #expect(session.canSend)
     }

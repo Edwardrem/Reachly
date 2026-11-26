@@ -119,8 +119,7 @@ struct AIIntegrationSetupView: View {
         case .settings:
             dismiss()
         case .launch:
-            SettingsRouter.shared.requestedTab = "ai-integration"
-            openSettings()
+            SettingsNavigation.shared.show(SettingsNavigation.aiIntegration, using: openSettings)
         }
     }
 }

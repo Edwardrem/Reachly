@@ -14,6 +14,8 @@ public final class AgentSession {
     public private(set) var streamingThinking = ""
     /// Tool call in progress, for the status line.
     public private(set) var activeTool: String?
+    /// Why the last run ended early. The transcript also records it, as a
+    /// failure row where the reply stopped.
     public private(set) var lastError: String?
     public private(set) var lastModel: String?
     public private(set) var servedByFallback = false
@@ -42,19 +44,105 @@ public final class AgentSession {
         self.provider = provider
         self.systemPrompt = systemPrompt
         self.toolRunner = toolRunner
-        self.messages = AgentTranscript.repaired(messages)
+        self.messages = AgentTranscript.healed(messages)
     }
 
     public var canSend: Bool { !isRunning }
 
-    public func send(_ text: String, attachments: [AgentAttachment] = []) {
+    /// Names the conversation the session holds. `replace` gives each
+    /// conversation it swaps in a new token, so work that started before an
+    /// await (building a provider can wait on Touch ID) can pass the token it
+    /// started with and change nothing if another conversation is shown by then.
+    public struct ConversationToken: Hashable, Sendable {
+        fileprivate let id = UUID()
+    }
+
+    public private(set) var conversationToken = ConversationToken()
+
+    /// Sends a message. With `token`, only while the session still holds that
+    /// conversation; returns whether the message was sent.
+    @discardableResult
+    public func send(_ text: String, attachments: [AgentAttachment] = [], in token: ConversationToken? = nil) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty || !attachments.isEmpty, !isRunning else { return }
+        guard !trimmed.isEmpty || !attachments.isEmpty, !isRunning, holds(token) else { return false }
         // A transcript loaded from an older version can end in an unanswered call;
         // heal it before the new turn goes after it.
-        messages = AgentTranscript.repaired(messages)
+        messages = AgentTranscript.healed(messages)
         append(.user(trimmed, attachments: attachments))
         start()
+        return true
+    }
+
+    /// Records a turn that could not start (no key, Touch ID cancelled): the
+    /// message joins the transcript with the reason in a failure row under it,
+    /// so what was typed and attached is kept and `retry` can send it. With
+    /// `token`, only while the session still holds that conversation.
+    @discardableResult
+    public func recordUnsent(_ text: String, attachments: [AgentAttachment] = [], reason: String, in token: ConversationToken? = nil) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty || !attachments.isEmpty, !isRunning, holds(token) else { return false }
+        messages = AgentTranscript.healed(messages)
+        messages.append(.user(trimmed, attachments: attachments))
+        fail(.setup, reason)
+        return true
+    }
+
+    /// Records that a retry could not start. A row for a message that was never
+    /// sent now gives this reason; any other row keeps its own failure, and what
+    /// streamed before it, and adds that the retry did not start. Without a
+    /// failure row at the end, a new one is added. With `token`, only while the
+    /// session still holds that conversation.
+    @discardableResult
+    public func recordSetupFailure(_ reason: String, in token: ConversationToken? = nil) -> Bool {
+        guard !isRunning, holds(token) else { return false }
+        lastError = reason
+        guard let last = messages.indices.last, let current = messages[last].failure else {
+            append(AgentMessage(failure: AgentFailure(kind: .setup, message: reason)))
+            return true
+        }
+        var updated = current
+        if current.kind == .setup {
+            updated.message = reason
+        } else {
+            updated.retryError = reason
+        }
+        messages[last].blocks = messages[last].blocks.map { block in
+            if case .failure = block { return .failure(updated) }
+            return block
+        }
+        transcriptDidChange?()
+        return true
+    }
+
+    /// True when the conversation ends in a failure row that `retry` can run again.
+    public var canRetry: Bool {
+        !isRunning && messages.last?.failure != nil && messages.contains { $0.role == .user && $0.failure == nil }
+    }
+
+    /// Runs the turn that ended in the latest failure row again. The row goes,
+    /// with the reply it ended if that reply finished the turn (cut off,
+    /// refused, stopped), and the model answers again from the last user turn
+    /// or tool results. The user's message is not repeated, and completed tool
+    /// rounds are not run again. With `token`, only while the session still
+    /// holds that conversation; returns whether the turn started.
+    @discardableResult
+    public func retry(in token: ConversationToken? = nil) -> Bool {
+        guard canRetry, holds(token) else { return false }
+        var kept = messages
+        kept.removeLast()
+        while let last = kept.last, last.role == .assistant, last.failure == nil {
+            kept.removeLast()
+        }
+        kept = AgentTranscript.healed(kept)
+        guard AgentTranscript.repaired(kept).last?.role == .user else { return false }
+        messages = kept
+        transcriptDidChange?()
+        start()
+        return true
+    }
+
+    private func holds(_ token: ConversationToken?) -> Bool {
+        token.map { $0 == conversationToken } ?? true
     }
 
     /// Stops the current reply or tool call. Pending tool calls get error results so the transcript stays valid.
@@ -85,7 +173,8 @@ public final class AgentSession {
             activeTool = nil
             task = nil
         }
-        self.messages = AgentTranscript.repaired(messages)
+        self.messages = AgentTranscript.healed(messages)
+        conversationToken = ConversationToken()
         lastError = nil
     }
 
@@ -98,7 +187,7 @@ public final class AgentSession {
         let message = messages[index]
         messages.removeSubrange(index...)
         // Cutting at any id can leave a reply with unanswered calls at the end.
-        messages = AgentTranscript.repaired(messages)
+        messages = AgentTranscript.healed(messages)
         lastError = nil
         transcriptDidChange?()
         return message
@@ -138,6 +227,36 @@ public final class AgentSession {
         transcriptDidChange?()
     }
 
+    /// What has streamed of the reply in progress: its reasoning, then its text.
+    private var partialBlocks: [AgentContentBlock] {
+        var blocks: [AgentContentBlock] = []
+        if !streamingThinking.isEmpty { blocks.append(.thinking(text: streamingThinking, signature: nil)) }
+        if !streamingText.isEmpty { blocks.append(.text(streamingText)) }
+        return blocks
+    }
+
+    /// Ends the run early: `message` becomes `lastError` and a failure row in
+    /// the transcript. With `keepingPartial`, what streamed of the unfinished
+    /// reply goes in the row, shown but never sent.
+    private func fail(_ kind: AgentFailure.Kind, _ message: String, keepingPartial: Bool = false) {
+        lastError = message
+        let partial = keepingPartial ? partialBlocks : []
+        append(AgentMessage(failure: AgentFailure(kind: kind, message: message), partial: partial, model: partial.isEmpty ? nil : lastModel))
+    }
+
+    /// The user stopped the stream. Streamed text stays a reply the model sees
+    /// next time, as before, now with its reasoning; reasoning alone is kept in the row.
+    private func stopped() {
+        if streamingText.isEmpty {
+            fail(.stopped, Self.stoppedText, keepingPartial: true)
+        } else {
+            append(AgentMessage(role: .assistant, blocks: partialBlocks, model: lastModel))
+            fail(.stopped, Self.stoppedText)
+        }
+    }
+
+    private static let stoppedText = "Stopped."
+
     private func run(generation: Int) async {
         for _ in 0..<maxToolRounds {
             guard isCurrent(generation) else { return }
@@ -149,15 +268,15 @@ public final class AgentSession {
                 response = try await streamOnce(generation: generation)
             } catch is CancellationError {
                 guard isCurrent(generation) else { return }
-                if !streamingText.isEmpty { append(AgentMessage(role: .assistant, blocks: [.text(streamingText)], model: lastModel)) }
-                lastError = "Stopped."
+                stopped()
                 return
             } catch {
                 guard isCurrent(generation) else { return }
                 if Task.isCancelled {
-                    lastError = "Stopped."
+                    stopped()
                 } else {
-                    lastError = error.localizedDescription
+                    // What streamed before the failure stays in view, in the row.
+                    fail(.error, error.localizedDescription, keepingPartial: true)
                 }
                 return
             }
@@ -167,7 +286,7 @@ public final class AgentSession {
             let normalised = AgentTranscript.withoutInvalidToolUses(response.message)
             // A reply whose only content was unusable calls has nothing to show.
             guard !normalised.blocks.isEmpty || response.message.blocks.isEmpty else {
-                lastError = "The model's reply could not be read. Send the message again."
+                fail(.unreadable, "The model's reply could not be read. Send the message again.")
                 return
             }
             let reply = Self.boundingCutOffInputs(normalised)
@@ -216,31 +335,32 @@ public final class AgentSession {
                 activeTool = nil
                 append(AgentMessage(role: .user, blocks: results))
                 if Task.isCancelled {
-                    lastError = "Stopped."
+                    fail(.stopped, Self.stoppedText)
                     return
                 }
             case .pauseTurn:
                 continue
             case .maxTokens:
-                lastError = "The reply was cut off at the model's output limit. Send \"continue\" to go on."
+                fail(.cutOff, "The reply was cut off at the model's output limit. Send \"continue\" to go on.")
                 return
             case .refusal:
-                lastError = "The model declined to continue" + (response.refusalCategory.map { " (\($0))" } ?? "") + "."
+                fail(.refusal, "The model declined to continue" + (response.refusalCategory.map { " (\($0))" } ?? "") + ".")
                 return
             case .endTurn, .other:
                 if !interruptedCalls.isEmpty {
-                    lastError = "The reply was interrupted before a tool call finished. Send \"continue\" to go on."
+                    fail(.interrupted, "The reply was interrupted before a tool call finished. Send \"continue\" to go on.")
                 }
                 return
             }
         }
         guard isCurrent(generation) else { return }
-        lastError = "Stopped after \(maxToolRounds) rounds of tool calls. Send a message to continue."
+        fail(.toolRounds, "Stopped after \(maxToolRounds) rounds of tool calls. Send a message to continue.")
     }
 
     private func streamOnce(generation: Int) async throws -> LLMResponse {
         // Defence in depth: the provider gets a transcript the API accepts even
-        // if some other path left an unanswered call behind.
+        // if some other path left an unanswered call behind. `repaired` also
+        // leaves out failure rows, which are for the reader only.
         let request = LLMRequest(system: systemPrompt, messages: AgentTranscript.repaired(messages), tools: tools)
         var final: LLMResponse?
         for try await event in provider.stream(request) {

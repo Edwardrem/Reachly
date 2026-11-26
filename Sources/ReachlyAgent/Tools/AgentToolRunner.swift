@@ -25,6 +25,8 @@ public final class AgentToolRunner {
         case cancelled
         case localFile(String)
         case document(String)
+        /// An edit arrived for a tool whose sheet line is a stand-in; nothing ran.
+        case editNotApplicable(String)
 
         public var errorDescription: String? {
             switch self {
@@ -36,6 +38,7 @@ public final class AgentToolRunner {
             case .cancelled: "The action was cancelled."
             case .localFile(let detail): detail
             case .document(let detail): detail
+            case .editNotApplicable(let tool): "The user's edit can't be applied to \(tool); nothing ran."
             }
         }
     }
@@ -55,10 +58,20 @@ public final class AgentToolRunner {
         self.conversationID = conversationID
     }
 
+    /// The user sent a comment from the approval sheet instead of running the
+    /// command. Not a failure: it ends the call early with a normal result.
+    private struct ChangesRequested: Error {
+        let feedback: String
+    }
+
     /// Runs one tool call. Errors become results with `isError` so the model can react.
     public func call(name: String, input: JSONValue) async -> Result {
         do {
             return Result(content: try await dispatch(name: name, input: input), isError: false)
+        } catch let changes as ChangesRequested {
+            // The user is steering, not refusing: a plain result reads as their
+            // reply, so the model revises the command or asks a question.
+            return Result(content: changes.feedback, isError: false)
         } catch is CancellationError {
             return Result(content: Failure.cancelled.localizedDescription, isError: true)
         } catch {
@@ -275,17 +288,53 @@ public final class AgentToolRunner {
             case .approved:
                 return (command, .approved, why)
             case .edited(let text):
+                guard request.isCommandEditable else {
+                    // The sheet shows these read-only. The edited text is not
+                    // this tool's input, so never run the original in its place.
+                    let failure = Failure.editNotApplicable(tool.rawValue)
+                    recordNotRun(tool: tool, on: target, command: command, reason: reason, decision: .denied, detail: failure.localizedDescription)
+                    throw failure
+                }
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty else {
                     recordNotRun(tool: tool, on: target, command: command, reason: reason, decision: .denied, detail: "edited to an empty command")
                     throw Failure.denied("")
                 }
                 return (trimmed, .edited, why)
+            case .requestChanges(let text, let edited):
+                guard let comment = AgentApprovalResponse.normalizedComment(text) else {
+                    // The sheet never sends an empty comment; refuse one anyway.
+                    recordNotRun(tool: tool, on: target, command: command, reason: reason, decision: .denied, detail: "empty change request")
+                    throw Failure.denied("Do not retry it unchanged; ask the user how to proceed if it is needed.")
+                }
+                // Only run_command's text is real input; the audit records what the model was told.
+                let suggestion = request.isCommandEditable ? AgentApprovalResponse.suggestion(edited, proposed: command) : nil
+                let detail = AgentAuditDecision.changesRequestedDetail(guardrail: why, comment: comment, suggestion: suggestion)
+                recordNotRun(tool: tool, on: target, command: command, reason: reason, decision: .changesRequested, detail: detail)
+                throw ChangesRequested(feedback: Self.changesRequestedText(tool: tool, host: target, comment: comment, suggestion: suggestion))
             case .denied:
                 recordNotRun(tool: tool, on: target, command: command, reason: reason, decision: .denied, detail: why)
                 throw Failure.denied("Do not retry it unchanged; ask the user how to proceed if it is needed.")
             }
         }
+    }
+
+    /// How every changes-requested tool result begins.
+    public static let changesRequestedPrefix = "The user did not run this command and wants changes"
+
+    /// What the model reads when the user asks for changes: nothing ran, their
+    /// comment as typed, their edited command when there is one (run_command
+    /// only), and what to do next.
+    static func changesRequestedText(tool: AgentToolName, host target: AgentHostInfo, comment: String, suggestion: String?) -> String {
+        var text = changesRequestedPrefix + " before anything runs on \(target.name). Their comment:\n<user_comment>\n\(comment)\n</user_comment>\n"
+        if tool == .runCommand, let suggestion {
+            text += "They also edited the command in the approval sheet. Their suggested version:\n<suggested_command>\n\(suggestion)\n</suggested_command>\n"
+        }
+        text += tool == .runCommand
+            ? "Nothing ran. Change the command to follow their comment and call run_command again"
+            : "Nothing ran. Adjust the \(tool.rawValue) arguments to follow their comment and call \(tool.rawValue) again"
+        text += "; the user reviews the new version before it runs. If the comment asks a question or is unclear, reply to the user instead of calling the tool."
+        return text
     }
 
     private func resolveHost(_ reference: String) throws -> AgentHostInfo {

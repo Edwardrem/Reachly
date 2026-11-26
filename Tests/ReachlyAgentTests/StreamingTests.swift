@@ -207,6 +207,86 @@ struct TranscriptTests {
         #expect(try AgentTranscript.decode(Data()).isEmpty)
     }
 
+    @Test func failureRowsRoundTrip() throws {
+        let messages: [AgentMessage] = [
+            .user("hello"),
+            AgentMessage(failure: AgentFailure(kind: .error, message: "Overloaded (overloaded_error)"), partial: [.thinking(text: "t", signature: nil), .text("half")], model: "m"),
+            .user("again"),
+            AgentMessage(failure: AgentFailure(kind: .refusal, message: "The model declined to continue.", retryError: "Touch ID was cancelled.")),
+            .user("once more"),
+            AgentMessage(failure: AgentFailure(kind: .setup, message: "Add your Claude API key in Settings › AI Integration to start.")),
+        ]
+        let data = try AgentTranscript.encode(messages)
+        let decoded = try AgentTranscript.decode(data)
+        #expect(decoded.map(\.blocks) == messages.map(\.blocks))
+        #expect(decoded.map(\.role) == messages.map(\.role))
+        #expect(decoded.map(\.id) == messages.map(\.id))
+        #expect(decoded.map(\.model) == messages.map(\.model))
+        #expect(decoded.map(\.failure?.kind) == [nil, .error, nil, .refusal, nil, .setup])
+        #expect(decoded[3].failure?.retryError == "Touch ID was cancelled.")
+
+        let json = try JSONValue.parse(data)
+        let row = json.arrayValue?.last?["blocks"]?.arrayValue?.first
+        #expect(row?["type"]?.stringValue == "failure")
+        #expect(row?["failure"]?["kind"]?.stringValue == "setup")
+    }
+
+    @Test func transcriptSavedBeforeFailureRowsStillDecodes() throws {
+        // What 1.0.1 writes: no failure rows.
+        let saved = #"""
+        [{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FF","role":"user","blocks":[{"type":"text","text":"Check the disk"}],"createdAt":"2026-11-20T09:15:00Z"},
+        {"id":"7A1B2C3D-0000-4000-8000-000000000001","role":"assistant","blocks":[{"type":"thinking","text":"Look first.","signature":"sig"},{"type":"text","text":"Checking."},{"type":"tool_use","id":"t1","name":"run_command","input":{"host":"web-01","command":"df -h"}}],"createdAt":"2026-11-20T09:15:02Z","model":"claude-opus-5-5"},
+        {"id":"7A1B2C3D-0000-4000-8000-000000000002","role":"user","blocks":[{"type":"tool_result","tool_use_id":"t1","content":"91%","is_error":false}],"createdAt":"2026-11-20T09:15:03Z"},
+        {"id":"7A1B2C3D-0000-4000-8000-000000000003","role":"assistant","blocks":[{"type":"text","text":"Root is at 91%."}],"createdAt":"2026-11-20T09:15:05Z"}]
+        """#
+        let decoded = try AgentTranscript.decode(Data(saved.utf8))
+        #expect(decoded.map(\.role) == [.user, .assistant, .user, .assistant])
+        #expect(decoded.allSatisfy { $0.failure == nil })
+        #expect(decoded[1].model == "claude-opus-5-5")
+        #expect(decoded[3].text == "Root is at 91%.")
+        #expect(AgentTranscript.healed(decoded) == decoded)
+        #expect(AgentTranscript.repaired(decoded) == decoded)
+    }
+
+    @Test func failureKindFromALaterVersionReadsAsAnError() throws {
+        let saved = #"[{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FF","role":"assistant","blocks":[{"type":"failure","failure":{"kind":"quota","message":"Out of credit."}}],"createdAt":"2026-11-20T09:15:00Z"}]"#
+        #expect(try AgentTranscript.decode(Data(saved.utf8)).first?.failure == AgentFailure(kind: .error, message: "Out of credit."))
+    }
+
+    @Test func plainTextIncludesFailureRows() {
+        let messages: [AgentMessage] = [
+            .user("Check the disk"),
+            AgentMessage(failure: AgentFailure(kind: .error, message: "Overloaded (overloaded_error)"), partial: [.thinking(text: "hidden", signature: nil), .text("Root is at")]),
+            .user("Try again"),
+            AgentMessage(role: .assistant, blocks: [.text("Root is at 91%.")]),
+            AgentMessage(failure: AgentFailure(kind: .cutOff, message: "The reply was cut off at the model's output limit. Send \"continue\" to go on.")),
+            .user("Now /data"),
+            AgentMessage(failure: AgentFailure(kind: .setup, message: "Add your Caimex API key in Settings › AI Integration to start.")),
+        ]
+        #expect(AgentTranscript.plainText(messages, assistantName: "Caimex") == """
+        You:
+        Check the disk
+
+        Caimex:
+        Root is at
+
+        [The request failed: Overloaded (overloaded_error)]
+
+        You:
+        Try again
+
+        Caimex:
+        Root is at 91%.
+
+        [The reply was cut off at the model's output limit. Send "continue" to go on.]
+
+        You:
+        Now /data
+
+        [Not sent: Add your Caimex API key in Settings › AI Integration to start.]
+        """)
+    }
+
     @Test func jsonValueNumbers() throws {
         let value = try JSONValue.parse(#"{"i":3,"f":2.5,"big":12345678901234,"neg":-1}"#)
         #expect(value["i"]?.intValue == 3)

@@ -53,6 +53,8 @@ struct ContentView: View {
                     SnippetListView()
                 case .history:
                     HistoryListView()
+                case .aiHistory:
+                    AIHistoryListView()
                 case .ports:
                     PortForwardListView()
                 }
@@ -253,6 +255,16 @@ struct ContentView: View {
                 Label("Clear History", systemImage: "trash")
             }
             .help("Clear the command history")
+        case .aiHistory:
+            Menu {
+                Button("Export JSON…") { AgentAuditLog.exportJSONReportingErrors(from: modelContext) }
+                Button("Clear…") { appState.isConfirmingClearAIHistory = true }
+                Divider()
+                Button("AI Integration Settings…") { SettingsNavigation.shared.show(SettingsNavigation.aiIntegration, using: openSettings) }
+            } label: {
+                Label("AI History", systemImage: "ellipsis.circle")
+            }
+            .help("Export or clear the AI history, or open its settings")
         case .ports:
             Button {
                 appState.portForwardEditor = .create(hostID: appState.selectedHostID)

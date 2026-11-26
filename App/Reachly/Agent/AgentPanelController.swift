@@ -26,8 +26,15 @@ final class AgentPanelController {
     private(set) var scope: Scope = .all
     private(set) var session: AgentSession?
     private(set) var conversation: AgentConversation?
-    /// Why the last send could not start (missing key, bad URL).
-    private(set) var setupError: String?
+    /// True while a send or a retry builds its provider (which can wait on
+    /// Touch ID), so a second one cannot start meanwhile.
+    private(set) var isPreparing = false
+    /// Bumped when the user sends or retries, so the transcript goes to its end
+    /// and follows the reply even if it had been scrolled up.
+    private(set) var scrollToEndRequest = 0
+    /// Text from a send that was given back because another conversation was
+    /// showing by the time it could start. The composer takes it with `takeRestoredDraft`.
+    private(set) var restoredDraft: String?
     /// Bumped whenever the saved conversation list changes.
     private(set) var conversationsVersion = 0
     /// Files attached to the message being written, in the order they were added.
@@ -121,10 +128,25 @@ final class AgentPanelController {
         let messages = (try? AgentTranscript.decode(stored.transcript)) ?? []
         if let session {
             session.replace(messages: messages)
+            // Commands from here on are audited under this conversation, not the one shown before.
+            session.toolRunner.conversationID = stored.uuid
         } else {
             session = makeSession(messages: messages)
         }
-        setupError = nil
+    }
+
+    /// Opens a saved conversation from elsewhere in the app (AI History), moving
+    /// the scope to the host or group it was saved for. Returns false when it no
+    /// longer exists. A conversation already showing is left running.
+    @discardableResult
+    func open(conversationID id: UUID) -> Bool {
+        if conversation?.uuid == id { return true }
+        guard let stored = try? context.fetch(FetchDescriptor<AgentConversation>(predicate: #Predicate { $0.uuid == id })).first else {
+            return false
+        }
+        scope = stored.hostID.map(Scope.host) ?? stored.groupID.map(Scope.group) ?? .all
+        open(stored)
+        return true
     }
 
     func newConversation() {
@@ -133,10 +155,10 @@ final class AgentPanelController {
         conversation = nil
         if let session {
             session.replace(messages: [])
+            session.toolRunner.conversationID = nil
         } else {
             session = makeSession(messages: [])
         }
-        setupError = nil
     }
 
     func delete(_ stored: AgentConversation) {
@@ -237,9 +259,9 @@ final class AgentPanelController {
     }
 
     /// Whether this message can be rewritten: a user turn the person typed
-    /// (not a tool result), while no reply is running.
+    /// (not a tool result), while no reply is running or starting.
     func canEdit(_ message: AgentMessage) -> Bool {
-        message.role == .user && (!message.text.isEmpty || !message.attachments.isEmpty) && session?.isRunning != true
+        message.role == .user && (!message.text.isEmpty || !message.attachments.isEmpty) && session?.isRunning != true && !isPreparing
     }
 
     /// Starts rewriting an earlier message: its files go back in the pending
@@ -264,7 +286,7 @@ final class AgentPanelController {
     // MARK: Sending
 
     var canSend: Bool {
-        session?.isRunning != true && !isAttaching
+        session?.isRunning != true && !isAttaching && !isPreparing
     }
 
     func send(_ text: String) {
@@ -272,40 +294,110 @@ final class AgentPanelController {
         guard !trimmed.isEmpty || !pendingAttachments.isEmpty else { return }
         let session = session ?? makeSession(messages: [])
         self.session = session
-        guard session.canSend else { return }
+        guard session.canSend, !isPreparing else { return }
         let files = pendingAttachments
         let edited = editing
+        // Building the provider can wait on Touch ID, and History, the scope menu
+        // or New Conversation can show another conversation meanwhile. The message
+        // belongs to the one it was written in.
+        let started = session.conversationToken
         pendingAttachments = []
         attachmentError = nil
-        setupError = nil
+        isPreparing = true
+        scrollToEndRequest += 1
         Task {
+            defer { isPreparing = false }
+            var setupFailure: String?
             do {
-                // One snapshot before any await: the prompt must not be able to retarget the key or host.
-                let plan = settings.providerPlan()
-                if providerConfiguration != plan.configuration
-                    || providerKeyVersion != plan.keyVersion
-                    || session.provider is PlaceholderProvider {
-                    session.provider = try await settings.makeProvider(for: plan)
-                    providerConfiguration = plan.configuration
-                    providerKeyVersion = plan.keyVersion
-                    providerKind = plan.configuration.kind
-                }
-                session.systemPrompt = systemPrompt(providerName: plan.configuration.kind.agentName)
-                if let edited, editing?.id == edited.id {
-                    // The rewritten message takes the place of the original and of
-                    // every reply that followed it. Files taken off the edit go with it.
-                    editing = nil
-                    session.rewind(to: edited.id)
-                    let kept = Set(files.map(\.id))
-                    for file in edited.attachments where !kept.contains(file.id) { AttachmentImporter.discard(file) }
-                }
-                session.send(trimmed, attachments: files)
+                try await prepareProvider(for: session)
             } catch {
-                // Keep the files so the user can try again once the key is set.
-                pendingAttachments = files + pendingAttachments
-                setupError = error.localizedDescription
+                setupFailure = error.localizedDescription
+            }
+            guard self.session === session, session.conversationToken == started else {
+                // Another conversation is showing: nothing goes into it. The text
+                // and files go back to the composer instead.
+                restoreUnsent(trimmed, files: files, edited: edited)
+                return
+            }
+            // Until the edit is applied, the original message keeps its files.
+            var stillEditing = edited
+            if let edited, editing?.id == edited.id {
+                // The rewritten message takes the place of the original and of
+                // every reply that followed it. Files taken off the edit go with it.
+                editing = nil
+                stillEditing = nil
+                session.rewind(to: edited.id)
+                let kept = Set(files.map(\.id))
+                for file in edited.attachments where !kept.contains(file.id) { AttachmentImporter.discard(file) }
+            }
+            let delivered = if let setupFailure {
+                // The message and its files stay in the transcript with the reason
+                // under it, and Retry sends them once the key is set.
+                session.recordUnsent(trimmed, attachments: files, reason: setupFailure, in: started)
+            } else {
+                session.send(trimmed, attachments: files, in: started)
+            }
+            if !delivered { restoreUnsent(trimmed, files: files, edited: stillEditing) }
+        }
+    }
+
+    func takeRestoredDraft() -> String? {
+        defer { restoredDraft = nil }
+        return restoredDraft
+    }
+
+    /// Puts an unsent message back in the composer. Files that came with an
+    /// earlier message being edited stay with that message, in its own
+    /// conversation; files added since go back to the pending list.
+    private func restoreUnsent(_ text: String, files: [AgentAttachment], edited: AgentMessage?) {
+        let original = Set(edited?.attachments.map(\.id) ?? [])
+        pendingAttachments = files.filter { !original.contains($0.id) } + pendingAttachments
+        if !text.isEmpty {
+            restoredDraft = restoredDraft.map { $0 + "\n\n" + text } ?? text
+        }
+    }
+
+    /// Whether this failure row is the latest and its turn can run again.
+    func canRetry(_ message: AgentMessage) -> Bool {
+        guard let session, !isPreparing, session.canRetry else { return false }
+        return session.messages.last?.id == message.id
+    }
+
+    /// Runs the turn that ended in the latest failure row again, building the
+    /// provider first if the settings changed. If it still cannot start, the
+    /// row says why instead of a new one being added.
+    func retry() {
+        guard let session, session.canRetry, !isPreparing else { return }
+        // As in `send`: the retry is for the conversation showing now. If another
+        // one is showing once the provider is ready, nothing happens.
+        let started = session.conversationToken
+        isPreparing = true
+        scrollToEndRequest += 1
+        Task {
+            defer { isPreparing = false }
+            do {
+                try await prepareProvider(for: session)
+                session.retry(in: started)
+            } catch {
+                session.recordSetupFailure(error.localizedDescription, in: started)
             }
         }
+    }
+
+    /// Builds the provider when the settings or the key changed since the last
+    /// turn, and points the system prompt at the current scope.
+    private func prepareProvider(for session: AgentSession) async throws {
+        // One snapshot before any await: the prompt must not be able to retarget the key or host.
+        let plan = settings.providerPlan()
+        if providerConfiguration != plan.configuration
+            || providerKeyVersion != plan.keyVersion
+            || session.provider is PlaceholderProvider {
+            session.provider = try await settings.makeProvider(for: plan)
+            providerConfiguration = plan.configuration
+            providerKeyVersion = plan.keyVersion
+            providerKind = plan.configuration.kind
+        }
+        session.systemPrompt = systemPrompt(providerName: plan.configuration.kind.agentName)
     }
 
     func stop() {

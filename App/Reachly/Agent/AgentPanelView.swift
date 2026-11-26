@@ -21,7 +21,7 @@ struct AgentPanelView: View {
             header
             ChromeDivider()
             if let session = controller.session, !session.messages.isEmpty || session.isRunning {
-                AgentTranscriptView(session: session)
+                AgentTranscriptView(session: session, scrollToEndRequest: controller.scrollToEndRequest)
             } else {
                 emptyState
             }
@@ -219,11 +219,51 @@ struct AgentPanelView: View {
 
     // MARK: Status and composer
 
-    @ViewBuilder
     private var statusLine: some View {
+        AgentStatusLine()
+    }
+
+    private var composer: some View {
+        ComposerView(draft: $draft, focused: $composerFocused)
+    }
+
+    /// Finder drops arrive as file URLs; everything else is ignored. Every load starts here,
+    /// synchronously, because a drop session may end as soon as this returns; the URLs are then
+    /// collected in the providers' order and attached once, so the error covers the whole drop.
+    private func attach(_ providers: [NSItemProvider]) -> Bool {
+        let candidates = providers.filter { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }
+        guard !candidates.isEmpty else { return false }
+        let dropped = DroppedFileURLs(count: candidates.count)
+        let group = DispatchGroup()
+        for (index, provider) in candidates.enumerated() {
+            group.enter()
+            provider.loadDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier) { data, _ in
+                defer { group.leave() }
+                guard let data, let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
+                dropped.set(url, at: index)
+            }
+        }
+        group.notify(queue: .main) {
+            let urls = dropped.all()
+            MainActor.assumeIsolated {
+                controller.attach(urls: urls)
+            }
+        }
+        return true
+    }
+}
+
+/// The line above the composer: what the reply is doing, or who answered and
+/// the tokens used. Its own view because it reads the streaming reasoning, so a
+/// reasoning delta redraws this line rather than the whole panel.
+private struct AgentStatusLine: View {
+    @Environment(AgentPanelController.self) private var controller
+
+    var body: some View {
         let session = controller.session
         HStack(spacing: 8) {
-            if let error = controller.setupError ?? controller.attachmentError ?? session?.lastError {
+            // A reply that failed or could not start says so in the transcript, where it stopped.
+            if let error = controller.attachmentError {
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                 Text(error).lineLimit(2).textSelection(.enabled)
             } else if controller.isAttaching {
@@ -267,35 +307,6 @@ struct AgentPanelView: View {
                 .padding(.horizontal, 5)
                 .background(Design.Tint.conversation.opacity(0.22), in: Capsule())
         }
-    }
-
-    private var composer: some View {
-        ComposerView(draft: $draft, focused: $composerFocused)
-    }
-
-    /// Finder drops arrive as file URLs; everything else is ignored. Every load starts here,
-    /// synchronously, because a drop session may end as soon as this returns; the URLs are then
-    /// collected in the providers' order and attached once, so the error covers the whole drop.
-    private func attach(_ providers: [NSItemProvider]) -> Bool {
-        let candidates = providers.filter { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }
-        guard !candidates.isEmpty else { return false }
-        let dropped = DroppedFileURLs(count: candidates.count)
-        let group = DispatchGroup()
-        for (index, provider) in candidates.enumerated() {
-            group.enter()
-            provider.loadDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier) { data, _ in
-                defer { group.leave() }
-                guard let data, let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
-                dropped.set(url, at: index)
-            }
-        }
-        group.notify(queue: .main) {
-            let urls = dropped.all()
-            MainActor.assumeIsolated {
-                controller.attach(urls: urls)
-            }
-        }
-        return true
     }
 }
 
@@ -450,11 +461,23 @@ private struct ComposerView: View {
             draft = message.text
             focused.wrappedValue = true
         }
+        // A message sent while another conversation was being opened comes back
+        // here instead of going into that conversation.
+        .onChange(of: controller.restoredDraft) { _, _ in takeRestoredDraft() }
+        .onAppear { takeRestoredDraft() }
         #if DEBUG
         .onAppear {
             if CommandLine.arguments.contains("--qa-dictation-demo") { dictation.showListeningForQA() }
         }
         #endif
+    }
+
+    private func takeRestoredDraft() {
+        guard let text = controller.takeRestoredDraft() else { return }
+        if dictation.isListening { dictation.finish() }
+        let current = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        draft = current.isEmpty ? text : text + "\n\n" + current
+        focused.wrappedValue = true
     }
 
     private func toggleDictation() {
@@ -525,9 +548,27 @@ private struct DictationMeterView: View {
 
 // MARK: - Transcript
 
+/// The conversation, kept at its end while a reply comes in.
+///
+/// Following is driven by the scroll geometry, not by the session's streaming
+/// properties: whenever the content grows (reasoning, text, a tool call, the
+/// final message replacing the streamed one, a row height settling), the view
+/// scrolls back to the end, at most ten times a second and without animation,
+/// as long as the reader was there. Scrolling up stops it and shows Jump to
+/// latest; scrolling back down to the end starts it again. The body reads no
+/// streaming state, so a delta redraws only `AgentStreamingView`, which keeps
+/// churn out of the `NSScrollView` (see the note on `ComposerView`).
 struct AgentTranscriptView: View {
     @Environment(\.palette) private var palette
     let session: AgentSession
+    /// Bumped when the user sends or retries: go to the end and follow.
+    let scrollToEndRequest: Int
+    /// Mirrors `follower.isFollowing` for the Jump to latest control; written
+    /// only when it changes.
+    @State private var isFollowing = true
+    @State private var follower = TranscriptFollower()
+
+    private static let endID = "transcript-end"
 
     private var toolResults: [String: (content: String, isError: Bool)] {
         var results: [String: (String, Bool)] = [:]
@@ -550,13 +591,170 @@ struct AgentTranscriptView: View {
                     if session.isRunning {
                         AgentStreamingView(session: session)
                     }
-                    Color.clear.frame(height: 1).id("bottom")
+                    // The very end of the content: no padding below it, so
+                    // scrolling it to the bottom edge reaches the true end.
+                    Color.clear.frame(height: 1).id(Self.endID)
                 }
-                .padding(14)
+                .padding([.horizontal, .top], 14)
             }
-            .onChange(of: session.messages.count) { _, _ in proxy.scrollTo("bottom") }
-            .onChange(of: session.streamingText.count) { _, _ in proxy.scrollTo("bottom") }
+            // A conversation opens at its end, laid out from there; the jump on
+            // appear corrects it while the lazy rows settle.
+            .defaultScrollAnchor(.bottom, for: .initialOffset)
+            .onAppear { jumpToEnd(proxy) }
+            .onScrollGeometryChange(for: TranscriptScrollMetrics.self, of: TranscriptScrollMetrics.init) { old, new in
+                follow(from: old, to: new, proxy: proxy)
+            }
+            .onChange(of: session.messages.count) { _, _ in
+                // A message landed; the rows around it settle over the next few layouts.
+                follower.settle()
+                follower.scrollToEnd(proxy, id: Self.endID)
+            }
+            .onChange(of: session.isRunning) { _, _ in
+                follower.settle()
+                follower.scrollToEnd(proxy, id: Self.endID)
+            }
+            .onChange(of: session.messages.first?.id) { _, _ in
+                // Another conversation was opened in this panel.
+                jumpToEnd(proxy)
+            }
+            .onChange(of: scrollToEndRequest) { _, _ in
+                jumpToEnd(proxy)
+            }
+            .overlay(alignment: .bottom) {
+                jumpToLatest(proxy)
+            }
             .schemeEdges(palette)
+        }
+    }
+
+    /// Always in the hierarchy and only faded, so following on and off never
+    /// inserts or removes a view under the pointer.
+    private func jumpToLatest(_ proxy: ScrollViewProxy) -> some View {
+        Button {
+            jumpToEnd(proxy)
+        } label: {
+            Label("Jump to latest", systemImage: "arrow.down")
+                .font(.callout.weight(.medium))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(palette.raised, in: Capsule())
+                .overlay(Capsule().strokeBorder(palette.separator, lineWidth: 0.5))
+                .shadow(color: .black.opacity(0.12), radius: 3, y: 1)
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(palette.text)
+        .help("Scroll to the end of the conversation and follow the reply")
+        .padding(.bottom, 10)
+        .opacity(isFollowing ? 0 : 1)
+        .allowsHitTesting(!isFollowing)
+        .accessibilityHidden(isFollowing)
+    }
+
+    private func setFollowing(_ value: Bool) {
+        follower.isFollowing = value
+        if !value { follower.cancelScroll() }
+        if isFollowing != value { isFollowing = value }
+    }
+
+    private func jumpToEnd(_ proxy: ScrollViewProxy) {
+        setFollowing(true)
+        follower.beginJump()
+        follower.scrollToEnd(proxy, id: Self.endID)
+    }
+
+    private func follow(from old: TranscriptScrollMetrics, to new: TranscriptScrollMetrics, proxy: ScrollViewProxy) {
+        let atEnd = new.distanceToEnd <= 2
+        let movedUp = new.offset < old.offset - 0.5
+        let movedDown = new.offset > old.offset + 0.5
+        if atEnd || (movedDown && new.distanceToEnd <= TranscriptFollower.rejoinDistance) {
+            setFollowing(true)
+        } else if movedUp && !follower.isJumping {
+            // The reader scrolled up. Content growing at the end leaves the
+            // offset where it is, and shrinking content clamps it to the end, so
+            // neither lands here. During a jump, rows settling above may shift
+            // the offset; that is not the reader.
+            setFollowing(false)
+        }
+        // A shorter panel or a taller composer hides the end: keep it in view.
+        if new.containerHeight != old.containerHeight { follower.settle() }
+        guard follower.isFollowing, !atEnd, follower.tracksGrowth(running: session.isRunning) else { return }
+        follower.scrollToEnd(proxy, id: Self.endID)
+    }
+}
+
+/// Where the transcript is scrolled: rounded so that sub-point layout noise
+/// does not count as a change.
+private struct TranscriptScrollMetrics: Equatable {
+    var offset: CGFloat
+    /// How far the visible area is above the end of the content.
+    var distanceToEnd: CGFloat
+    var containerHeight: CGFloat
+
+    init(_ geometry: ScrollGeometry) {
+        let maximumOffset = geometry.contentSize.height + geometry.contentInsets.bottom - geometry.containerSize.height
+        offset = Self.rounded(geometry.contentOffset.y)
+        distanceToEnd = Self.rounded(maximumOffset - geometry.contentOffset.y)
+        containerHeight = Self.rounded(geometry.containerSize.height)
+    }
+
+    private static func rounded(_ value: CGFloat) -> CGFloat {
+        (value * 2).rounded() / 2
+    }
+}
+
+/// The transcript's following state and its throttled scrolling. A plain
+/// class held in `@State`, so updating it never redraws the transcript.
+@MainActor
+private final class TranscriptFollower {
+    /// Scrolled down to within this distance of the end, the view follows again.
+    static let rejoinDistance: CGFloat = 40
+    /// At most one scroll to the end per interval.
+    private static let interval: Duration = .milliseconds(100)
+
+    var isFollowing = true
+    private var lastScroll = ContinuousClock.now - .seconds(1)
+    private var pending: Task<Void, Never>?
+    /// Until then, content growth is followed even with no reply running: a
+    /// message has just landed or a conversation has just opened.
+    private var settleUntil = ContinuousClock.now
+    /// Until then, upward shifts are layout settling during a jump, not the reader.
+    private var jumpUntil = ContinuousClock.now
+
+    var isJumping: Bool { ContinuousClock.now < jumpUntil }
+
+    /// While idle, only growth just after a change is followed, so opening a
+    /// tool call near the end does not pull the view down.
+    func tracksGrowth(running: Bool) -> Bool {
+        running || ContinuousClock.now < settleUntil
+    }
+
+    func settle() {
+        settleUntil = max(settleUntil, ContinuousClock.now + .milliseconds(750))
+    }
+
+    func beginJump() {
+        jumpUntil = ContinuousClock.now + .milliseconds(500)
+        settle()
+    }
+
+    func cancelScroll() {
+        pending?.cancel()
+        pending = nil
+    }
+
+    /// Scrolls to the end on the next turn of the run loop, or when the
+    /// interval since the last scroll has passed. Calls in between are merged.
+    func scrollToEnd(_ proxy: ScrollViewProxy, id: String) {
+        guard isFollowing, pending == nil else { return }
+        let wait = max(.zero, lastScroll + Self.interval - ContinuousClock.now)
+        pending = Task { @MainActor [weak self] in
+            if wait > .zero { try? await Task.sleep(for: wait) }
+            guard let self, !Task.isCancelled else { return }
+            self.pending = nil
+            guard self.isFollowing else { return }
+            self.lastScroll = ContinuousClock.now
+            proxy.scrollTo(id, anchor: .bottom)
         }
     }
 }
@@ -609,16 +807,49 @@ private struct AgentMessageView: View {
                         Text("Thinking (redacted)").font(.caption).foregroundStyle(.tertiary)
                     case .toolUse(let id, let name, let input):
                         ToolCallView(name: name, input: input, result: results[id])
+                    case .failure(let failure):
+                        FailureRow(failure: failure, message: message)
                     case .toolResult, .attachment:
                         EmptyView()
                     }
                 }
-                if !message.text.isEmpty {
+                // A failure row's partial text stays selectable but is not a reply to copy.
+                if !message.text.isEmpty, message.failure == nil {
                     MessageActions(message: message)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+/// Where a reply stopped and why: a provider or network error, a cut-off or
+/// refused reply, the tool-round limit, a stop, or a request that could not
+/// start. Saved with the conversation and never sent to the model. The latest
+/// one can run its turn again.
+private struct FailureRow: View {
+    let failure: AgentFailure
+    /// The failure row's message, to tell whether it is the latest.
+    let message: AgentMessage
+    @Environment(AgentPanelController.self) private var controller
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: failure.kind == .stopped ? "stop.circle.fill" : "exclamationmark.triangle.fill")
+                .foregroundStyle(failure.kind == .stopped ? AnyShapeStyle(.secondary) : AnyShapeStyle(.orange))
+            Text(failure.summary)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if controller.canRetry(message) {
+                Button("Retry") { controller.retry() }
+                    .controlSize(.small)
+                    .help(failure.kind == .setup ? "Send this message again" : "Ask for the reply again")
+            }
+        }
+        .font(.callout)
+        .card(padding: 9, radius: Design.radiusMedium)
     }
 }
 
@@ -1052,6 +1283,8 @@ private struct ToolCallView: View {
     private var statusColor: Color {
         guard let result else { return .orange }
         if result.isError { return .red }
+        // Nothing ran: the user sent a comment back from the approval sheet.
+        if result.content.hasPrefix(AgentToolRunner.changesRequestedPrefix) { return .blue }
         if let status = exitStatus, status != 0 { return .yellow }
         return .green
     }

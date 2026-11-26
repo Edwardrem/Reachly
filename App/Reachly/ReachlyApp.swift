@@ -166,6 +166,8 @@ struct ReachlyApp: App {
                     .keyboardShortcut("s", modifiers: [.command, .shift])
                 Button("Show History") { appState.sidebarMode = .history }
                     .keyboardShortcut("y", modifiers: .command)
+                Button("Show AI History") { appState.sidebarMode = .aiHistory }
+                    .keyboardShortcut("y", modifiers: [.command, .option])
                 Button("Show Port Forwarding") { appState.sidebarMode = .ports }
                     .keyboardShortcut("p", modifiers: [.command, .shift])
                 Divider()
