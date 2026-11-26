@@ -134,6 +134,8 @@ struct FileBrowserPane: View {
                     Image(systemName: item.icon).foregroundStyle(item.isDirectory ? Color.accentColor : .secondary)
                     Text(item.name).lineLimit(1)
                 }
+                .opacity(cutOpacity(item))
+                .accessibilityValue(model.isCut(item, in: side) ? "Cut" : "")
                 .onDrag { NSItemProvider(object: DragPayload(paneID: pane.id, paths: dragPaths(for: item)).encoded as NSString) }
                 .onDrop(of: [.plainText, .fileURL], isTargeted: nil) { providers in
                     item.isDirectory ? handleDrop(providers, intoFolder: item.path) : false
@@ -141,19 +143,19 @@ struct FileBrowserPane: View {
             }
             .width(min: 160)
             TableColumn("Size") { item in
-                Text(item.sizeDescription).foregroundStyle(.secondary).monospacedDigit()
+                Text(item.sizeDescription).foregroundStyle(.secondary).monospacedDigit().opacity(cutOpacity(item))
             }
             .width(80)
             TableColumn("Modified") { item in
-                Text(item.modified.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "").foregroundStyle(.secondary)
+                Text(item.modified.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "").foregroundStyle(.secondary).opacity(cutOpacity(item))
             }
             .width(150)
             TableColumn("Mode") { item in
-                Text(item.modeString).font(.caption.monospaced()).foregroundStyle(.secondary)
+                Text(item.modeString).font(.caption.monospaced()).foregroundStyle(.secondary).opacity(cutOpacity(item))
             }
             .width(90)
             TableColumn("Owner") { item in
-                Text(item.owner ?? "").font(.caption).foregroundStyle(.secondary)
+                Text(item.owner ?? "").font(.caption).foregroundStyle(.secondary).opacity(cutOpacity(item))
             }
             .width(90)
         }
@@ -185,6 +187,11 @@ struct FileBrowserPane: View {
             // Only a selection that gains items: a refresh dropping vanished items is not the user moving here.
             if !new.isSubset(of: old) { focusPane() }
         }
+    }
+
+    /// Rows waiting for a Cut to be pasted look dimmed, as in the Finder.
+    private func cutOpacity(_ item: FileItem) -> Double {
+        model.isCut(item, in: side) ? 0.45 : 1
     }
 
     private func dragPaths(for item: FileItem) -> [String] {

@@ -20,6 +20,13 @@ final class SFTPWindowModel {
         let transfers: [TransferItem]
     }
 
+    /// The rows a Cut put on the clipboard, in the pane they were cut from.
+    struct CutRows: Equatable {
+        let side: Side
+        let source: PaneSource
+        let paths: Set<String>
+    }
+
     /// A transfer that could not be queued, with the message to show.
     private struct QueueError: LocalizedError {
         let errorDescription: String?
@@ -66,10 +73,14 @@ final class SFTPWindowModel {
         openWith.onUploaded = { [weak self] hostID, remotePath in
             self?.refreshPanes(on: .remote(hostID: hostID), showing: [SFTP.parent(remotePath)])
         }
-        for pane in [left, right] {
+        for (pane, side) in [(left, Side.left), (right, Side.right)] {
             let paneID = pane.id
             pane.onFoldersChanged = { [weak self] source, folders in
                 self?.refreshPanes(on: source, showing: folders, except: paneID)
+            }
+            pane.onLocationChanged = { [weak self] in
+                // The cut rows are no longer in view: stop dimming them. The clipboard keeps the Cut.
+                if self?.cutRows?.side == side { self?.cutRows = nil }
             }
         }
     }
@@ -339,6 +350,16 @@ final class SFTPWindowModel {
 
     var canPaste: Bool { clipboard != nil && !isPasting }
 
+    /// The rows of the last Cut, shown dimmed in the pane they came from until a paste, a new Copy or Cut, or that
+    /// pane moving to another folder or host.
+    private(set) var cutRows: CutRows?
+
+    /// True when `item` is one of the cut rows the pane on `side` shows dimmed.
+    func isCut(_ item: FileItem, in side: Side) -> Bool {
+        guard let cutRows, cutRows.side == side, pane(side).source == cutRows.source else { return false }
+        return cutRows.paths.contains(item.path)
+    }
+
     /// Puts the items on the clipboard to be copied by the next Paste.
     func copyToClipboard(_ items: [FileItem], from side: Side) {
         putOnClipboard(items, operation: .copy, from: side)
@@ -356,8 +377,9 @@ final class SFTPWindowModel {
             side: pane(side).source.fileSide,
             items: items.map { FileClipboard.Item(path: $0.path, name: $0.name, isDirectory: $0.isDirectory) })
         clipboardFiles = Dictionary(items.map { ($0.path, $0) }, uniquingKeysWith: { first, _ in first })
+        cutRows = operation == .cut ? CutRows(side: side, source: pane(side).source, paths: Set(items.map(\.path))) : nil
         let what = Self.describe(items.map(\.name))
-        status = operation == .copy ? "Copied \(what)." : "Cut \(what). Paste to move \(items.count == 1 ? "it" : "them")."
+        status = operation == .copy ? "Copied \(what)." : "\(what) cut. Paste to move \(items.count == 1 ? "it" : "them")."
     }
 
     /// Pastes the clipboard into `folder` on `side` (nil: that pane's current folder), following `PastePlan`.
@@ -365,6 +387,7 @@ final class SFTPWindowModel {
         guard let clipboard, !isPasting else { return }
         isPasting = true
         defer { isPasting = false }
+        let cutRowsBefore = cutRows
         let pane = pane(side)
         let backend = pane.backend
         let destinationName = pane.title
@@ -422,6 +445,8 @@ final class SFTPWindowModel {
             }
         }
         settlePendingCuts()
+        // The paste ends the dimming, unless a Cut made while it ran brought rows of its own.
+        if cutRows == cutRowsBefore { cutRows = nil }
 
         let didSomething = !pasted.isEmpty || !queued.isEmpty
         if clipboard.operation == .cut, didSomething, self.clipboard == clipboard {

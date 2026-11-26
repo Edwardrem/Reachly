@@ -98,8 +98,9 @@ conversations. Your real hosts never leave your Mac.
 
   The panes also offer New File…, Duplicate, Move to…, and Copy, Cut and
   Paste (⌘C, ⌘X, ⌘V while a file list has focus) within a side or between
-  sides; Paste on a folder pastes into it. Nothing is overwritten: a taken
-  name gets a copy name or an error, a file that appears while a paste is
+  sides; Paste on a folder pastes into it. Cut items look dimmed in their
+  pane until they are pasted or the pane moves on. Nothing is overwritten:
+  a taken name gets a copy name or an error, a file that appears while a paste is
   queued stops that transfer, and Cut to the other side removes the
   originals only once everything has arrived. Every delete asks first. While
   the Files window is in front, its Files menu has Reload (⌘R), New File…
