@@ -29,21 +29,38 @@ public final class SFTPClient: @unchecked Sendable {
 
     public var isOpen: Bool { channel.isActive }
 
-    /// Starts the `sftp` subsystem and negotiates version 3.
-    public static func open(on connection: SSHConnection) async throws -> SFTPClient {
+    /// Starts the `sftp` subsystem and negotiates version 3. Throws `SFTP.Error.unavailable` when the server
+    /// refuses the subsystem, and gives up when the server doesn't answer the request or the handshake within
+    /// `timeout`.
+    public static func open(on connection: SSHConnection, timeout: TimeAmount = .seconds(20)) async throws -> SFTPClient {
         let handler = SFTPResponseHandler()
-        let channel = try await connection.openSubsystem("sftp") { child in
-            try child.pipeline.syncOperations.addHandler(handler)
+        let channel: Channel
+        do {
+            channel = try await connection.openSubsystem("sftp", timeout: timeout) { child in
+                try child.pipeline.syncOperations.addHandler(handler)
+            }
+        } catch SSHClientError.subsystemUnavailable {
+            throw SFTP.Error.unavailable
         }
         let client = SFTPClient(connection: connection, channel: channel, handler: handler)
-        var writer = SFTPWriter()
-        writer.writeUInt8(SFTP.PacketType.initialize.rawValue)
-        writer.writeUInt32(SFTP.protocolVersion)
-        let reply = try await client.send(writer, expectingVersion: true)
-        var reader = SFTPReader(reply)
-        guard try reader.readUInt8() == SFTP.PacketType.version.rawValue else { throw SFTP.Error.protocolError("expected SSH_FXP_VERSION") }
-        let version = try reader.readUInt32()
-        guard version >= 3 else { throw SFTP.Error.unsupportedVersion(version) }
+        // A backstop: a server that took the subsystem but never answers would leave the caller waiting.
+        let deadline = channel.eventLoop.scheduleTask(in: timeout) {
+            handler.fail(id: SFTPResponseHandler.versionKey, error: SFTP.Error.protocolError("no answer to the handshake within \(timeout.nanoseconds / 1_000_000_000) seconds"))
+        }
+        defer { deadline.cancel() }
+        do {
+            var writer = SFTPWriter()
+            writer.writeUInt8(SFTP.PacketType.initialize.rawValue)
+            writer.writeUInt32(SFTP.protocolVersion)
+            let reply = try await client.send(writer, expectingVersion: true)
+            var reader = SFTPReader(reply)
+            guard try reader.readUInt8() == SFTP.PacketType.version.rawValue else { throw SFTP.Error.protocolError("expected SSH_FXP_VERSION") }
+            let version = try reader.readUInt32()
+            guard version >= 3 else { throw SFTP.Error.unsupportedVersion(version) }
+        } catch {
+            client.close()
+            throw error
+        }
         return client
     }
 

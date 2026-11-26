@@ -275,7 +275,7 @@ Releases are cut by pushing a `vX.Y.Z` tag; see [docs/RELEASING.md](docs/RELEASI
 
 ```sh
 swift test                                   # unit tests, no network, no Keychain
-Scripts/test-sshd.sh start                   # throwaway sshd on 127.0.0.1:2222, no root needed
+Scripts/test-sshd.sh start                   # throwaway sshd on 127.0.0.1:2222 (and one without SFTP on :2223), no root needed
 source .build/test-sshd/env.sh && swift test --filter Live
 Scripts/test-sshd.sh stop
 REACHLY_KEYCHAIN_TESTS=1 swift test --filter SecretStore   # writes to and cleans the login keychain
@@ -288,7 +288,9 @@ proxies), the SOCKS5 and HTTP CONNECT codecs, the SFTP packet codecs, the
 AWS Signature V4 signer and the EC2 / DigitalOcean / Azure response parsers,
 the theme importers, the command guard and the MCP server. The live tests
 open a real PTY shell, run exec commands, push a key, install the
-shell-integration hooks and check host-key handling against a throwaway sshd.
+shell-integration hooks, check host-key handling and exercise the SFTP file
+operations against a throwaway sshd, and check that SFTP fails promptly on a
+server that doesn't offer it.
 
 For manual QA against scratch data, launch the Debug build with
 `REACHLY_DATA_DIR=/some/dir REACHLY_KEYCHAIN_SERVICE=io.github.edwardrem.reachly.qa` and the

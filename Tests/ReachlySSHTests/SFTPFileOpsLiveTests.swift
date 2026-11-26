@@ -19,7 +19,7 @@ struct SFTPFileOpsLiveTests {
             hostKeyVerifier: InsecureAcceptAllHostKeys())
         let sftp: SFTPClient
         do {
-            // A server without an sftp subsystem never answers the handshake; fail instead of waiting forever.
+            // A server without an sftp subsystem refuses it; the timeout keeps a regression from hanging the run.
             sftp = try await Self.withTimeout(.seconds(15)) { try await SFTPClient.open(on: connection) }
         } catch {
             connection.close()
@@ -106,6 +106,51 @@ struct SFTPFileOpsLiveTests {
         } catch {
             return error
         }
+    }
+
+    // MARK: A server without SFTP
+
+    @Test(.enabled(if: LiveServer.current?.noSFTPPort != nil))
+    func openingSFTPWhereTheServerRefusesItFailsPromptlyAndClearly() async throws {
+        let server = try #require(LiveServer.current)
+        let port = try #require(server.noSFTPPort)
+        let key = try SSHPrivateKey.load(fromPath: server.keyPath)
+        let connection = try await SSHConnection.connect(
+            host: server.host, port: port,
+            credentials: SSHCredentials(username: server.user, secret: .privateKey(key)),
+            hostKeyVerifier: InsecureAcceptAllHostKeys())
+        defer { connection.close() }
+
+        let clock = ContinuousClock()
+        let started = clock.now
+        // The backstop here only keeps a regression from hanging the run; the refusal itself takes one round trip.
+        let error = await Self.error { _ = try await Self.withTimeout(.seconds(10)) { try await SFTPClient.open(on: connection) } }
+        let elapsed = clock.now - started
+        #expect(error as? SFTP.Error == .unavailable, "\(String(describing: error))")
+        #expect(error?.localizedDescription == "This server doesn't offer SFTP.")
+        #expect(elapsed < .seconds(3), "took \(elapsed)")
+
+        // Only the refused channel was closed: the connection still runs commands.
+        let result = try await connection.run("echo still-here")
+        #expect(result.stdoutText == "still-here\n")
+    }
+
+    @Test func aRefusedSubsystemIsReportedByName() async throws {
+        // `openSubsystem` waits for the answer to its want-reply request: an unknown name is refused the way a missing
+        // Subsystem line refuses sftp, and the error names it.
+        let server = try #require(LiveServer.current)
+        let key = try SSHPrivateKey.load(fromPath: server.keyPath)
+        let connection = try await SSHConnection.connect(
+            host: server.host, port: server.port,
+            credentials: SSHCredentials(username: server.user, secret: .privateKey(key)),
+            hostKeyVerifier: InsecureAcceptAllHostKeys())
+        defer { connection.close() }
+        let error = await Self.error {
+            _ = try await Self.withTimeout(.seconds(10)) {
+                try await connection.openSubsystem("reachly-no-such-subsystem") { _ in }
+            }
+        }
+        #expect(error as? SSHClientError == .subsystemUnavailable("reachly-no-such-subsystem"), "\(String(describing: error))")
     }
 
     // MARK: createFile

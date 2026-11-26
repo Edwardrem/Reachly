@@ -8,12 +8,16 @@ import Testing
 /// Set `REACHLY_TEST_SSH_PORT` and `REACHLY_TEST_SSH_KEY` (an unencrypted Ed25519
 /// or ECDSA key listed in the server's authorized_keys). `REACHLY_TEST_SSH_HOST`
 /// defaults to 127.0.0.1 and `REACHLY_TEST_SSH_USER` to the current user.
-/// `Scripts/test-sshd.sh` starts a suitable throwaway server.
+/// `REACHLY_TEST_SSH_NOSFTP_PORT` names a second server on that host, taking
+/// the same key, that has no SFTP subsystem.
+/// `Scripts/test-sshd.sh` starts suitable throwaway servers.
 struct LiveServer: Sendable {
     let host: String
     let port: Int
     let user: String
     let keyPath: String
+    /// The server without an SFTP subsystem, when one is running.
+    var noSFTPPort: Int?
 
     static let current: LiveServer? = {
         let env = ProcessInfo.processInfo.environment
@@ -24,7 +28,8 @@ struct LiveServer: Sendable {
             host: env["REACHLY_TEST_SSH_HOST"] ?? "127.0.0.1",
             port: port,
             user: env["REACHLY_TEST_SSH_USER"] ?? NSUserName(),
-            keyPath: keyPath)
+            keyPath: keyPath,
+            noSFTPPort: env["REACHLY_TEST_SSH_NOSFTP_PORT"].flatMap { Int($0) })
     }()
 
     static var isConfigured: Bool { current != nil }
