@@ -254,4 +254,23 @@ extension LLMProviderConfiguration.Kind {
         case .openAICompatible: "Reachly endpoint API key"
         }
     }
+
+    /// The provider's page for creating a key, or nil for a typed endpoint, whose key comes from the
+    /// user's own server.
+    public var keyPageURL: URL? {
+        switch self {
+        case .anthropic: URL(string: "https://platform.claude.com/settings/keys")
+        case .caimex: URL(string: "https://caimex.ai/api-keys")
+        case .openAICompatible: nil
+        }
+    }
+
+    /// One line on where that page sits in the provider's console, shown beside the link.
+    public var keyPageLocation: String? {
+        switch self {
+        case .anthropic: "Claude Console › Settings › API keys. The secret is shown only once, when the key is created."
+        case .caimex: "Caimex › Developer › API keys, once you are signed in."
+        case .openAICompatible: nil
+        }
+    }
 }

@@ -31,10 +31,13 @@ public struct APIKeyMigration {
 
     private let store: any APIKeyStore
     private let defaults: UserDefaults
+    /// The previews beside the keys: one follows its item when the item moves, and goes when it is deleted.
+    private let hints: APIKeyHintStore
 
     public init(store: any APIKeyStore = SecretStore.shared, defaults: UserDefaults = .standard) {
         self.store = store
         self.defaults = defaults
+        self.hints = APIKeyHintStore(defaults: defaults)
     }
 
     /// Runs the one-time decision from the kind 0.3.8 saved, and retries a move that is still pending.
@@ -120,6 +123,7 @@ public struct APIKeyMigration {
                 to: destination,
                 label: LLMProviderConfiguration.Kind.openAICompatible.keychainLabel
             )
+            hints.move(from: .anthropic, to: .openAICompatible)
             record(.settled)
         } catch {
             // Could not tell what is stored: keep the old item away from Anthropic until a later look.
@@ -138,6 +142,7 @@ public struct APIKeyMigration {
                     // But an Anthropic key must never be deleted as if it were an endpoint key.
                     if try !store.itemHasPrefix(account: source, prefix: Self.anthropicKeyPrefix) {
                         try store.delete(account: source)
+                        hints.forget(.anthropic)
                     }
                 }
             } else if try store.itemExists(account: source) {
@@ -148,6 +153,7 @@ public struct APIKeyMigration {
                         to: destination,
                         label: LLMProviderConfiguration.Kind.openAICompatible.keychainLabel
                     )
+                    hints.move(from: .anthropic, to: .openAICompatible)
                 }
             }
             record(.settled)

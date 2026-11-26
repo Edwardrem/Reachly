@@ -9,6 +9,8 @@ struct ClaudeSettingsView: View {
     @Environment(MCPServerController.self) private var mcp
     @State private var settings = AgentSettings.shared
     @State private var apiKeyDraft = ""
+    /// Shows the draft in a plain field so the user can read what they typed or pasted.
+    @State private var isKeyVisible = false
     @State private var keyMessage: String?
     @State private var customModel = ""
     @State private var portText = ""
@@ -103,14 +105,37 @@ struct ClaudeSettingsView: View {
             }
             Section("API key") {
                 HStack {
-                    SecureField(keyPlaceholder, text: $apiKeyDraft)
-                        .onSubmit(saveKey)
+                    keyField
+                    Button {
+                        isKeyVisible.toggle()
+                    } label: {
+                        Image(systemName: isKeyVisible ? "eye.slash" : "eye")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(isKeyVisible ? "Hide the key" : "Show the key")
+                    .accessibilityLabel(isKeyVisible ? "Hide the key" : "Show the key")
                     Button("Save") { saveKey() }
-                        .disabled(apiKeyDraft.trimmingCharacters(in: .whitespaces).isEmpty)
+                        .disabled(!canSaveDraft)
                     if settings.hasAPIKey {
                         Button("Remove") {
                             do { try settings.removeAPIKey(); keyMessage = "Key removed." } catch { keyMessage = error.localizedDescription }
                         }
+                    }
+                }
+                if let url = kind.keyPageURL {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Link("Get a key", destination: url)
+                            .help(url.absoluteString)
+                        if let location = kind.keyPageLocation {
+                            Text(location).foregroundStyle(.secondary)
+                        }
+                    }
+                    .font(.caption)
+                }
+                // A key saved before previews existed has none; the status line below still says it is saved.
+                if settings.hasAPIKey, let hint = settings.savedKeyHint {
+                    LabeledContent("Saved key") {
+                        Text(hint).font(.body.monospaced())
                     }
                 }
                 HStack(spacing: 6) {
@@ -158,6 +183,9 @@ struct ClaudeSettingsView: View {
         .formStyle(.grouped)
         .themedForm()
         .padding(.bottom)
+        // Only asks whether the item exists, so a key removed elsewhere (Security › Remove All) stops showing
+        // here; it never reads the key or unlocks the vault.
+        .onAppear { settings.refreshKeyState() }
         .task(id: settings.configuration.kind) {
             // The list is public, so loading it never asks for the key or the vault.
             guard settings.configuration.kind == .caimex, caimexModels.isEmpty else { return }
@@ -167,10 +195,29 @@ struct ClaudeSettingsView: View {
             // One reset for every kind change, however it happens: a key typed for one provider must never
             // be saved to another, and the status and Caimex field state belong to the old provider.
             apiKeyDraft = ""
+            isKeyVisible = false
             keyMessage = nil
             caimexTypingCustom = false
             caimexError = nil
         }
+    }
+
+    /// One draft behind both fields, so showing or hiding the key keeps what was typed.
+    @ViewBuilder
+    private var keyField: some View {
+        if isKeyVisible {
+            TextField(keyPlaceholder, text: $apiKeyDraft)
+                .font(.body.monospaced())
+                .autocorrectionDisabled()
+                .onSubmit(saveKey)
+        } else {
+            SecureField(keyPlaceholder, text: $apiKeyDraft)
+                .onSubmit(saveKey)
+        }
+    }
+
+    private var canSaveDraft: Bool {
+        !apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     @ViewBuilder
@@ -261,6 +308,9 @@ struct ClaudeSettingsView: View {
     }
 
     private func saveKey() {
+        // Return in an empty field must not reach `setAPIKey`, which treats an empty key as a removal.
+        guard canSaveDraft else { return }
+        isKeyVisible = false
         do {
             try settings.setAPIKey(apiKeyDraft)
             apiKeyDraft = ""
