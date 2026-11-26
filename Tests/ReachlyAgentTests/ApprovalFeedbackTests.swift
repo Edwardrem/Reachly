@@ -48,6 +48,7 @@ struct ApprovalFeedbackTests {
         #expect(result.content.contains("<suggested_command>\ndf -h /data\n</suggested_command>"))
         let record = try #require(host.auditRecords.first)
         #expect(record.decisionDetail.contains("Suggested command: df -h /data"))
+        #expect(AgentAuditDecision.changesRequestedComment(in: record.decisionDetail) == "Check the data volume instead.")
         // The entry keeps the command as proposed: the suggestion did not run.
         #expect(record.command == "df -h")
         #expect(record.proposedCommand == nil)
@@ -80,6 +81,7 @@ struct ApprovalFeedbackTests {
         #expect(!record.decision.ran)
         #expect(record.decision.displayName == "Changes requested")
         #expect(record.decisionDetail.contains("Comment: Use systemctl reload, not restart."))
+        #expect(AgentAuditDecision.changesRequestedComment(in: record.decisionDetail) == "Use systemctl reload, not restart.")
         #expect(record.reason == "apply config")
         #expect(record.source == .mcp)
         #expect(record.exitStatus == nil)
@@ -176,6 +178,28 @@ struct ApprovalFeedbackTests {
         #expect(provider.requests.count == 3)
         #expect(provider.requests[1].messages.last?.blocks.first == .toolResult(toolUseID: "t1", content: content, isError: false))
         #expect(session.messages.last?.text == "/srv has room.")
+    }
+
+    @Test func auditCommentReadsBackForTheRow() throws {
+        let multiline = "Keep today's logs.\nAnd skip /var/log/nginx/error.log."
+        let detail = AgentAuditDecision.changesRequestedDetail(guardrail: "Destructive: rm -rf.", comment: multiline, suggestion: "find /var/log/nginx -name '*.gz' -delete")
+        #expect(detail == "Destructive: rm -rf.\nSuggested command: find /var/log/nginx -name '*.gz' -delete\nComment: " + multiline)
+        #expect(AgentAuditDecision.changesRequestedComment(in: detail) == multiline)
+        #expect(AgentAuditDecision.changesRequestedComment(in: AgentAuditDecision.changesRequestedDetail(guardrail: "", comment: "Why sudo?", suggestion: nil)) == "Why sudo?")
+        #expect(AgentAuditDecision.changesRequestedComment(in: "This host asks for every command.") == nil)
+        #expect(AgentAuditDecision.changesRequestedComment(in: "This host asks for every command.\nComment:   ") == nil)
+
+        let revised = AgentAuditEntry(source: .agentPanel, hostID: nil, hostName: "web-01", hostTarget: "me@host", tool: "run_command", command: "rm -rf /var/log/nginx/*", reason: "", decision: .changesRequested, decisionDetail: detail)
+        #expect(revised.changesRequestedComment == multiline)
+        // Other decisions never show a comment line, whatever their detail says.
+        let denied = AgentAuditEntry(source: .agentPanel, hostID: nil, hostName: "web-01", hostTarget: "me@host", tool: "run_command", command: "true", reason: "", decision: .denied, decisionDetail: detail)
+        #expect(denied.changesRequestedComment == nil)
+    }
+
+    @Test func systemPromptExplainsComments() {
+        let prompt = AgentSystemPrompt.build(hosts: [], focus: nil)
+        #expect(prompt.contains("The user may approve, edit, deny, or send a comment asking for changes; a denied command must not be retried unchanged."))
+        #expect(prompt.contains("After a comment nothing has run: revise the command to follow it and call the tool again (the user reviews the new version), or reply to the user when the comment is a question."))
     }
 
     @Test func oldAuditRawValuesStillDecode() throws {

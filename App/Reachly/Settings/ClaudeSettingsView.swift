@@ -389,6 +389,9 @@ private struct AgentAuditRow: View {
             }
             .font(.caption)
             .foregroundStyle(.secondary)
+            if let comment = entry.changesRequestedComment {
+                Text(comment).font(.caption).foregroundStyle(.secondary).lineLimit(2).textSelection(.enabled)
+            }
         }
         .padding(.vertical, 2)
     }

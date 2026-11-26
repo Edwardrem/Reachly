@@ -298,8 +298,7 @@ public final class AgentToolRunner {
                     throw Failure.denied("Do not retry it unchanged; ask the user how to proceed if it is needed.")
                 }
                 let suggestion = AgentApprovalResponse.suggestion(edited, proposed: command)
-                var detail = "\(why)\nComment: \(comment)"
-                if let suggestion { detail += "\nSuggested command: \(suggestion)" }
+                let detail = AgentAuditDecision.changesRequestedDetail(guardrail: why, comment: comment, suggestion: suggestion)
                 recordNotRun(tool: tool, on: target, command: command, reason: reason, decision: .changesRequested, detail: detail)
                 throw ChangesRequested(feedback: Self.changesRequestedText(tool: tool, host: target, comment: comment, suggestion: suggestion))
             case .denied:

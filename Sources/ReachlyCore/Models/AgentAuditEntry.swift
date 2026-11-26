@@ -43,6 +43,33 @@ public enum AgentAuditDecision: String, Codable, Sendable, CaseIterable {
         case .denied, .blocked, .cancelled, .changesRequested: false
         }
     }
+
+    private static let commentMarker = "Comment: "
+
+    /// The decision detail for `.changesRequested`: the guardrail reason, the
+    /// suggested command when there is one, and the comment last, since it can
+    /// span lines.
+    public static func changesRequestedDetail(guardrail: String, comment: String, suggestion: String?) -> String {
+        var lines: [String] = []
+        if !guardrail.isEmpty { lines.append(guardrail) }
+        if let suggestion { lines.append("Suggested command: \(suggestion)") }
+        lines.append(commentMarker + comment)
+        return lines.joined(separator: "\n")
+    }
+
+    /// The comment inside a `changesRequestedDetail`, or nil when there is none.
+    public static func changesRequestedComment(in detail: String) -> String? {
+        let start: String.Index
+        if detail.hasPrefix(commentMarker) {
+            start = detail.index(detail.startIndex, offsetBy: commentMarker.count)
+        } else if let range = detail.range(of: "\n" + commentMarker) {
+            start = range.upperBound
+        } else {
+            return nil
+        }
+        let comment = detail[start...].trimmingCharacters(in: .whitespacesAndNewlines)
+        return comment.isEmpty ? nil : comment
+    }
 }
 
 /// One line of the agent audit log: every command or file change the agent
@@ -114,6 +141,11 @@ public final class AgentAuditEntry {
     public var decision: AgentAuditDecision {
         get { AgentAuditDecision(rawValue: decisionRaw) ?? .blocked }
         set { decisionRaw = newValue.rawValue }
+    }
+
+    /// What the user wrote when they asked for changes; nil for every other decision.
+    public var changesRequestedComment: String? {
+        decision == .changesRequested ? AgentAuditDecision.changesRequestedComment(in: decisionDetail) : nil
     }
 }
 
