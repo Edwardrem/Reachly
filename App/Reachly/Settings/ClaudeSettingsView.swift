@@ -146,6 +146,7 @@ struct ClaudeSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            AIProvidersFoundSection()
             Section("MCP server") {
                 Toggle("Expose Reachly's tools to Claude Desktop and Claude Code", isOn: $mcp.isEnabled)
                 HStack {

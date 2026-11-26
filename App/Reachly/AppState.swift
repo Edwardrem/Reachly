@@ -118,6 +118,8 @@ final class AppState {
     /// The host whose files are shown in the SFTP window (opened from a session or the sidebar).
     var sftpHostID: UUID?
     var isShowingCloudImport = false
+    /// The AI Integration setup sheet over the main window (first launch, or `--window=ai-setup`).
+    var isShowingAISetup = false
     var isShowingThemeEditor = false
     /// A theme fetched from a `reachly://theme?url=` link, waiting for the user to confirm.
     var pendingThemeInstall: PendingThemeInstall?
