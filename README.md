@@ -131,9 +131,12 @@ conversations. Your real hosts never leave your Mac.
   bridge, so every command on a server goes through the guardrails, the
   approval sheet ("Qoder wants to run…") and the audit log, filed under the
   conversation. Qoder's replies, reasoning, tool calls with their status and
-  its plan stream into the transcript; when Qoder asks to use one of its own
-  tools on this Mac, Reachly shows its options in a sheet, and closing it
-  rejects. Stop sends `session/cancel`; a crash leaves a failure row with
+  its plan stream into the transcript. Qoder's own tools run on this Mac under
+  Qoder's own settings, with your user's access, and Qoder decides when to
+  ask: Reachly starts it with `--permission-mode default` (the mode Qoder's
+  docs say asks before sensitive actions), and when Qoder asks, Reachly shows
+  its options in a sheet, and closing it rejects. The working folder is not a
+  sandbox. Stop sends `session/cancel`; a crash leaves a failure row with
   Retry. However a reply ends (answered, stopped, failed, Qoder gone), the
   sheets it was waiting on go, and a command it asks for after that gets no
   sheet. Each conversation keeps its Qoder session, and a restarted Qoder

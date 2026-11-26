@@ -20,7 +20,7 @@ struct AgentPermissionSheet: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(request.agentName) wants to use one of its own tools")
                         .font(.headline)
-                    Text("\(request.agentName)'s own tools run on this Mac under \(request.agentName)'s rules, and Reachly's tools run on servers under Reachly's.")
+                    Text("\(request.agentName)'s own tools run on this Mac under \(request.agentName)'s own settings, with your user's access, and \(request.agentName) decides when to ask. Commands on your servers through Reachly always go through Reachly's guardrails.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

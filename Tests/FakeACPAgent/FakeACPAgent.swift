@@ -59,6 +59,10 @@ enum FakeACPAgent {
             FileHandle.standardError.write(Data("error: unknown option '--acp'\n".utf8))
             exit(2)
         }
+        if scenario == "no-permission-mode", arguments.contains("--permission-mode") {
+            FileHandle.standardError.write(Data("error: unknown option '--permission-mode'\n".utf8))
+            exit(1)
+        }
         if scenario == "init-crash" {
             // Dies before it answers anything, with nothing about its arguments.
             FileHandle.standardError.write(Data("panic: the config file is broken\n".utf8))
@@ -129,7 +133,7 @@ enum FakeACPAgent {
 
     static func runPrompt(id: Any, session: String, conversation: String?) {
         switch scenario {
-        case "basic", "needs-subcommand", "loadable":
+        case "basic", "needs-subcommand", "loadable", "no-permission-mode":
             update(session, ["sessionUpdate": "agent_thought_chunk", "content": ["type": "text", "text": "Looking at the disk."]])
             text(session, "Root is ", messageID: "m1")
             text(session, "at 91%.", messageID: "m1")

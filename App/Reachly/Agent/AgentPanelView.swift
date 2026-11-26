@@ -184,7 +184,7 @@ struct AgentPanelView: View {
                 .font(.title2.weight(.semibold))
                 .foregroundStyle(palette.text)
             Text(controller.nextAssistantIsExternal
-                ? "\(controller.nextAssistantName) works on your hosts through Reachly's MCP server: every command shows in an agent tab, and the host's permission mode decides what asks first. \(controller.nextAssistantName)'s own tools run on this Mac under \(controller.nextAssistantName)'s rules, and Reachly asks you before each one."
+                ? "\(controller.nextAssistantName) works on your hosts through Reachly's MCP server: every command shows in an agent tab, and the host's permission mode decides what asks first. \(controller.nextAssistantName)'s own tools run on this Mac under its own settings, with your user's access; when \(controller.nextAssistantName) asks first, Reachly shows the request."
                 : "\(controller.nextAssistantName) inspects and operates your hosts over SSH, reads files you attach, and writes reports as PDF or Word. Every command shows in an agent tab, and the host's permission mode decides what asks first.")
                 .font(.body)
                 .foregroundStyle(.secondary)

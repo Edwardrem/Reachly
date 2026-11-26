@@ -310,7 +310,7 @@ public enum AIProviderCatalogue {
         let title = qoder.cliPath == nil ? "Qoder" : (qoder.appInstalled ? "Qoder and Qoder CLI" : "Qoder CLI")
         let note = "Qoder keeps its own sign-in; Reachly only offers it Reachly's tools over MCP."
         // The chat panel runs the CLI over ACP; the Qoder app alone has no ACP mode.
-        let chatNote = "In the chat panel, Qoder's own tools run on this Mac under Qoder's rules, and Reachly's tools run on servers under Reachly's."
+        let chatNote = "In the chat panel, Qoder's own tools run on this Mac under Qoder's own settings, with your user's access, and Reachly shows a request when Qoder asks first; commands on your servers go through Reachly's guardrails."
         if let cli = qoder.cliPath, reachly.kind == .qoder {
             let inUse = reachly.acpCommandPath == cli
             let serverOff = !reachly.mcpServerEnabled
@@ -512,11 +512,11 @@ public enum AIProviderCatalogue {
                 confirmTitle: nil)
         case .useQoderInChat:
             guard let cli = machine.qoder?.cliPath else { return notFound("The Qoder CLI") }
-            let command = MCPConnectCommand(executable: cli, arguments: ["--acp"])
+            let command = MCPConnectCommand(executable: cli, arguments: ["--acp", "--permission-mode", "default"])
             let target = machine.qoder?.cliTarget.map { " \(cli) leads to \($0), which is the file that runs; Reachly checks where it leads each time it starts Qoder, and never runs one inside an app bundle (that is the Qoder editor's launcher)." } ?? ""
             return AIProviderPrompt(
                 title: "Use Qoder in the chat panel?",
-                message: "Reachly selects Qoder (ACP) as the chat panel's provider. When you send a message there, Reachly runs this command and talks to it over the Agent Client Protocol; only if Qoder says it doesn't know --acp does Reachly run it with acp instead.\(target) It runs in a folder Reachly made for it in Application Support, not your home folder, and signs in with Qoder's own sign-in, which Reachly never reads. Qoder reaches your servers only through Reachly's MCP server, so its commands there go through Reachly's guardrails, approval sheet and audit log. Qoder's own tools run on this Mac under Qoder's rules, and Reachly asks you before each one it wants to use.\(serverNote)",
+                message: "Reachly selects Qoder (ACP) as the chat panel's provider. When you send a message there, Reachly runs this command and talks to it over the Agent Client Protocol; only if Qoder says it doesn't know --acp does Reachly run it with acp instead.\(target) Qoder signs in with its own sign-in, which Reachly never reads, and works in a folder Reachly made for it in Application Support, not your home folder; that folder is not a sandbox. Qoder reaches your servers only through Reachly's MCP server, so its commands there go through Reachly's guardrails, approval sheet and audit log. Qoder's own tools run on this Mac under Qoder's own settings, with your user's access. --permission-mode default starts Qoder in the mode its docs say asks before sensitive actions; Qoder decides what counts, its own allow rules still apply, and when it asks first, Reachly shows the request.\(serverNote)",
                 detail: command.displayString(home: home),
                 confirmTitle: "Use Qoder",
                 command: command)

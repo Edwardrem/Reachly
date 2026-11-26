@@ -397,7 +397,7 @@ final class FakeACPRun {
     let agent: ACPAgent
     var events: [ExternalAgentEvent] = []
 
-    init(_ scenario: String, cancelGrace: Duration = .seconds(5), initializeTimeout: Duration = .seconds(10), store: Bool = false, directory: URL? = nil, environment: [String: String] = [:]) {
+    init(_ scenario: String, cancelGrace: Duration = .seconds(5), initializeTimeout: Duration = .seconds(10), store: Bool = false, directory: URL? = nil, environment: [String: String] = [:], argumentSets: [[String]] = [["--acp"], ["acp"]], fallbackNotices: [String: String] = [:]) {
         let directory = directory ?? FileManager.default.temporaryDirectory.appending(path: "reachly-acp-\(UUID().uuidString)", directoryHint: .isDirectory)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         self.directory = directory
@@ -405,7 +405,8 @@ final class FakeACPRun {
         let configuration = ACPAgent.Configuration(
             name: "Qoder",
             executable: FakeACPAgentTool.path,
-            argumentSets: [["--acp"], ["acp"]],
+            argumentSets: argumentSets,
+            fallbackNotices: fallbackNotices,
             environment: environment.merging(["FAKE_ACP_SCENARIO": scenario, "FAKE_ACP_LOG": logURL.path]) { _, fixed in fixed },
             workingDirectory: directory.appending(path: "Workspace", directoryHint: .isDirectory),
             mcpServers: { key in
@@ -635,6 +636,35 @@ struct ACPAgentProcessTests {
         #expect(run.launches == ["ARGV --acp", "ARGV acp"])
         #expect(run.agent.launchArguments == ["acp"])
         #expect(run.texts.last == "Done.")
+    }
+
+    /// What the chat panel runs Qoder with.
+    static let panelArguments = [["--acp", "--permission-mode", "default"], ["--acp"], ["acp", "--permission-mode", "default"], ["acp"]]
+    static let panelNotices = ["--permission-mode": "Qoder didn't accept --permission-mode default, so it runs in the permission mode its own settings choose."]
+
+    @Test func qoderStartsInItsDefaultPermissionMode() async throws {
+        let run = FakeACPRun("basic", argumentSets: Self.panelArguments, fallbackNotices: Self.panelNotices)
+        defer { run.finish() }
+        _ = try await run.run()
+        #expect(run.launches == ["ARGV --acp --permission-mode default"])
+        #expect(!run.events.contains { if case .notice = $0 { true } else { false } })
+    }
+
+    @Test func aQoderThatRefusesThePermissionModeRunsWithoutItAndSaysSo() async throws {
+        let run = FakeACPRun("no-permission-mode", argumentSets: Self.panelArguments, fallbackNotices: Self.panelNotices)
+        defer { run.finish() }
+        _ = try await run.run()
+        #expect(run.launches == ["ARGV --acp --permission-mode default", "ARGV --acp"])
+        #expect(run.events.contains(.notice(Self.panelNotices["--permission-mode"]!)))
+        run.events = []
+        _ = try await run.run(run.turn("again", earlier: true))
+        #expect(!run.events.contains { if case .notice = $0 { true } else { false } }, "said once per start")
+
+        let subcommand = FakeACPRun("needs-subcommand", argumentSets: Self.panelArguments, fallbackNotices: Self.panelNotices)
+        defer { subcommand.finish() }
+        _ = try await subcommand.run()
+        #expect(subcommand.launches == ["ARGV --acp --permission-mode default", "ARGV acp --permission-mode default"], "the mode is kept when only --acp was refused")
+        #expect(!subcommand.events.contains { if case .notice = $0 { true } else { false } })
     }
 
     @Test func anAgentThatNeverInitializesIsASetupFailureAndIsNotTriedAgain() async throws {

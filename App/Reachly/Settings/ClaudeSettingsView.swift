@@ -306,7 +306,7 @@ struct ClaudeSettingsView: View {
         if let path = settings.configuration.acpCommandPath?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
             qoderPathCheck(path)
         }
-        Text("When you send a message in the chat panel, Reachly runs this CLI in ACP mode (--acp), in a folder of its own under Application Support. Qoder uses its own sign-in and models, which Reachly never reads. It reaches your servers only through Reachly's MCP server, under the same guardrails, approval sheet and audit log. Qoder's own tools run on this Mac under Qoder's rules, and Reachly asks you before each one. Use in Chat Panel on the Qoder row below fills this in.")
+        Text("When you send a message in the chat panel, Reachly runs this CLI in ACP mode (--acp --permission-mode default), in a folder of its own under Application Support, which is not a sandbox. Qoder uses its own sign-in and models, which Reachly never reads. It reaches your servers only through Reachly's MCP server, under the same guardrails, approval sheet and audit log. Qoder's own tools run on this Mac under Qoder's own settings, with your user's access: Qoder decides when to ask, and when it does, Reachly shows the request. Use in Chat Panel on the Qoder row below fills this in.")
             .font(.caption)
             .foregroundStyle(.secondary)
         if !mcp.isEnabled {

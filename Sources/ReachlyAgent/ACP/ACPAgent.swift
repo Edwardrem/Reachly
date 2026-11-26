@@ -18,6 +18,9 @@ public final class ACPAgent: ExternalAgent {
         /// argument (`unknown option '--acp'`), and then the next one without that argument: never after a
         /// timeout, a sign-in error or a crash. Qoder's docs give `--acp`; Zed's listing gives `acp`.
         public var argumentSets: [[String]]
+        /// Said once in the transcript when the agent started without one of these arguments because it refused
+        /// it, such as a permission setting the agent's version doesn't take.
+        public var fallbackNotices: [String: String]
         public var environment: [String: String]
         /// The agent's working directory and every session's `cwd`: a folder Reachly owns, never the home folder.
         public var workingDirectory: URL
@@ -39,6 +42,7 @@ public final class ACPAgent: ExternalAgent {
             name: String,
             executable: String,
             argumentSets: [[String]],
+            fallbackNotices: [String: String] = [:],
             environment: [String: String],
             workingDirectory: URL,
             mcpServers: @escaping @Sendable (_ conversationKey: String) -> [ACPProtocol.StdioMCPServer],
@@ -53,6 +57,7 @@ public final class ACPAgent: ExternalAgent {
             self.name = name
             self.executable = executable
             self.argumentSets = argumentSets
+            self.fallbackNotices = fallbackNotices
             self.environment = environment
             self.workingDirectory = workingDirectory
             self.mcpServers = mcpServers
@@ -100,6 +105,8 @@ public final class ACPAgent: ExternalAgent {
     }
 
     private var connection: ACPConnection?
+    /// What the next turn says about how the agent was started (`fallbackNotices`).
+    private var launchNotices: [String] = []
     /// The session each conversation uses in the running agent.
     private var liveSessions: [String: String] = [:]
     /// The session being restored with `session/load`: its replayed history is already in the transcript.
@@ -130,6 +137,8 @@ public final class ACPAgent: ExternalAgent {
         defer { turnEndHandler?(turn.conversationKey) }
         let connection = try await connect()
         events(.started(agent: agentInfo?.label))
+        for notice in launchNotices { events(.notice(notice)) }
+        launchNotices = []
         try Task.checkCancellation()
         let (sessionID, isNew) = try await session(for: turn.conversationKey, on: connection)
         if isNew, turn.hasEarlierTurns {
@@ -215,6 +224,9 @@ public final class ACPAgent: ExternalAgent {
                     on: connection)
                 agentInfo = try ACPProtocol.agentInfo(from: result)
                 launchArguments = arguments
+                launchNotices = configuration.fallbackNotices.keys.sorted()
+                    .filter { sets.first?.contains($0) == true && !arguments.contains($0) }
+                    .compactMap { configuration.fallbackNotices[$0] }
                 self.connection = connection
                 return connection
             } catch is CancellationError {

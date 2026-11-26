@@ -504,10 +504,15 @@ final class AgentPanelController {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let dataDirectory = AppPaths.applicationSupport.path
         let binary = URL(fileURLWithPath: command).lastPathComponent
+        let permissionMode = externalAgentPermissionMode
         return ACPAgent.Configuration(
             name: name,
             executable: executable,
-            argumentSets: [["--acp"], ["acp"]],
+            // Qoder's permission docs (docs.qoder.com/en/cli/permissions) give `--permission-mode default` for
+            // the session's mode, and its ACP docs say ACP mode has the CLI's permission settings. A Qoder that
+            // doesn't know the option runs without it, and the transcript says so.
+            argumentSets: [["--acp"] + permissionMode, ["--acp"], ["acp"] + permissionMode, ["acp"]],
+            fallbackNotices: ["--permission-mode": "\(name) didn't accept --permission-mode default, so it runs in the permission mode its own settings choose."],
             environment: ProviderDetector.toolEnvironment(for: command, home: home),
             workingDirectory: externalAgentWorkspace,
             mcpServers: { conversation in
@@ -524,6 +529,10 @@ final class AgentPanelController {
             sessionStore: externalAgentSessions,
             signInHint: "Run `\(binary) login` in Terminal, or start Reachly with QODER_PERSONAL_ACCESS_TOKEN set, then Retry. Reachly never sees \(name)'s sign-in.")
     }
+
+    /// Qoder's default permission mode, which its docs describe as asking before sensitive actions, in place of
+    /// a mode in its settings that skips asking (`bypass_permissions`, `auto`). Qoder still decides what asks.
+    nonisolated static let externalAgentPermissionMode = ["--permission-mode", "default"]
 
     /// Stops the agent process. The next message starts it again.
     func stopExternalAgent() {
