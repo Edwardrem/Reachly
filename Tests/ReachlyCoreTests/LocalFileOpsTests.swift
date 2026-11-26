@@ -16,6 +16,11 @@ import Testing
 
     private func cleanUp() { try? FileManager.default.removeItem(at: folder) }
 
+    /// The temporary folder's volume treats "a" and "A" as one name, as macOS volumes do by default.
+    private var ignoresCase: Bool {
+        (try? folder.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey]))?.volumeSupportsCaseSensitiveNames == false
+    }
+
     @Test func moveRefusesAnythingAtTheTarget() throws {
         defer { cleanUp() }
         try Data("keep".utf8).write(to: folder.appending(path: "taken.txt"))
@@ -25,6 +30,30 @@ import Testing
         // A free name works.
         try LocalFileOps.move(path("src/a.txt"), to: path("moved.txt"))
         #expect(FileManager.default.fileExists(atPath: path("moved.txt")) && !FileManager.default.fileExists(atPath: path("src/a.txt")))
+    }
+
+    @Test func aRenameThatOnlyChangesCaseWorks() throws {
+        defer { cleanUp() }
+        try LocalFileOps.move(path("src/a.txt"), to: path("src/A.txt"))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: path("src")).sorted() == ["A.txt", "sub"])
+        try LocalFileOps.move(path("src"), to: path("Src"))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: folder.path).sorted() == ["Src"])
+        guard ignoresCase else { return }
+        // Another file is still refused under another case of a name that is there.
+        try Data("b".utf8).write(to: folder.appending(path: "Src/b.txt"))
+        #expect(throws: POSIXError(.EEXIST)) { try LocalFileOps.move(path("Src/b.txt"), to: path("Src/a.txt")) }
+        #expect(try Data(contentsOf: folder.appending(path: "Src/A.txt")) == Data("a".utf8))
+    }
+
+    @Test func aFolderNeverGoesInsideItselfUnderAnotherCase() throws {
+        defer { cleanUp() }
+        // On a volume that tells "src" from "SRC", these are other folders, and there is nothing to refuse.
+        guard ignoresCase else { return }
+        for target in ["SRC/sub", "SRC/SUB/x"] {
+            #expect(throws: LocalFileOps.Refusal.self, "\(target)") { try LocalFileOps.refuseFolderIntoItself(path("src"), path(target)) }
+        }
+        #expect(throws: LocalFileOps.Refusal.self) { try LocalFileOps.move(path("src"), to: path("SRC/sub/src")) }
+        #expect(FileManager.default.fileExists(atPath: path("src/a.txt")))
     }
 
     @Test func aFolderNeverGoesInsideItselfEvenThroughASymlink() throws {

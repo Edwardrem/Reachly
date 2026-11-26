@@ -228,7 +228,7 @@ struct FileBrowserPane: View {
             Button("Copy") { model.copyToClipboard(items, from: side) }
             Button("Cut") { model.cutToClipboard(items, from: side) }
             if let folder = single, folder.isDirectory {
-                Button("Paste into “\(folder.name)”") { Task { await model.paste(into: side, folder: folder.path) } }
+                Button("Paste into “\(FileNaming.displayed(folder.name))”") { Task { await model.paste(into: side, folder: folder.path) } }
                     .disabled(!model.canPaste)
             }
             Button("Duplicate") { Task { await pane.duplicate(items) } }
