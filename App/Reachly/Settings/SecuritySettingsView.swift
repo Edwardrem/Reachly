@@ -1,4 +1,5 @@
 import SwiftUI
+import ReachlyAgent
 import ReachlyCore
 import ReachlyTerminal
 
@@ -64,6 +65,8 @@ struct SecuritySettingsView: View {
             Button("Remove All", role: .destructive) {
                 do {
                     try SecretStore.shared.deleteAll()
+                    // The API key previews describe keys that are gone now.
+                    APIKeyHintStore().removeAll()
                     message = "All saved secrets were removed. Identities that kept their key in the Keychain can no longer connect."
                 } catch {
                     message = error.localizedDescription

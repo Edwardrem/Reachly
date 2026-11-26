@@ -78,6 +78,23 @@ public struct APIKeyMigration {
         return (try? store.itemExists(account: account)) ?? false
     }
 
+    /// Whether the kind has a key it may use right now, and its preview. Only asks the store whether the item
+    /// exists, never for the secret. When the kind's own account definitely holds no item, its preview is
+    /// dropped, so a key removed elsewhere cannot leave one behind for a different key saved later. A
+    /// withheld account or an unreadable store answers "no key" and keeps the preview: the item may be there.
+    public func keyState(for kind: LLMProviderConfiguration.Kind) -> SavedKeyState {
+        guard let account = account(for: kind) else { return SavedKeyState(hasKey: false, hint: nil) }
+        do {
+            if try store.itemExists(account: account) {
+                return SavedKeyState(hasKey: true, hint: hints.hint(for: kind))
+            }
+            hints.forget(kind)
+        } catch {
+            // Could not tell: treat it as no key, as `hasKey` does, but keep the preview.
+        }
+        return SavedKeyState(hasKey: false, hint: nil)
+    }
+
     /// The account a key typed in Settings may be saved into. When a pending move withholds it, this
     /// retries the move once; nil still means "do not write", so the caller must refuse rather than fall
     /// back to the old account.

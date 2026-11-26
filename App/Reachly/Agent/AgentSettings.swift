@@ -48,8 +48,9 @@ final class AgentSettings {
         // Decide who owns the 0.3.8 key before anything reads it; this also retries a pending move.
         migration.run(legacyKind: stored.kind)
         self.migration = migration
-        hasAPIKey = migration.hasKey(for: stored.kind)
-        savedKeyHint = hasAPIKey ? hints.hint(for: stored.kind) : nil
+        let state = migration.keyState(for: stored.kind)
+        hasAPIKey = state.hasKey
+        savedKeyHint = state.hint
     }
 
     private func save() {
@@ -58,11 +59,13 @@ final class AgentSettings {
         }
     }
 
-    /// Re-reads whether the selected kind has a key, and its preview. It only asks the Keychain whether
-    /// the item exists: no secret is read and the vault stays locked, so Settings may call it on appear.
+    /// Re-reads whether the selected kind has a key, and its preview, dropping the preview when the
+    /// Keychain definitely has no item for it. It only asks whether the item exists: no secret is read and
+    /// the vault stays locked, so Settings may call it on appear.
     func refreshKeyState() {
-        hasAPIKey = migration.hasKey(for: configuration.kind)
-        savedKeyHint = hasAPIKey ? hints.hint(for: configuration.kind) : nil
+        let state = migration.keyState(for: configuration.kind)
+        hasAPIKey = state.hasKey
+        savedKeyHint = state.hint
     }
 
     /// Captures the provider's inputs before any prompt, so a picker change while Touch ID is up cannot
