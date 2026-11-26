@@ -2,7 +2,7 @@
 
 Releases are cut by pushing a tag. CI does the rest (see `.github/workflows/release.yml`).
 
-**State on 2026-11-26:** `v1.1.3` is the latest release and `v1.0.0` the first (all ad-hoc signed DMG, ZIP and `SHA256SUMS`).
+**State on 2026-11-26:** `v1.1.4` is the latest release and `v1.0.0` the first (all ad-hoc signed DMG, ZIP and `SHA256SUMS`). The `v1.1.3` tag has no release: its test gate failed on a flaky test, so its changes shipped as 1.1.4.
 
 Each release's hand-written notes live in `docs/releases/<version>.md`; the workflow prints them above the list of commits since the previous tag. Write that file before pushing the tag.
 
