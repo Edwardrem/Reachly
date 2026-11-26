@@ -461,11 +461,23 @@ private struct ComposerView: View {
             draft = message.text
             focused.wrappedValue = true
         }
+        // A message sent while another conversation was being opened comes back
+        // here instead of going into that conversation.
+        .onChange(of: controller.restoredDraft) { _, _ in takeRestoredDraft() }
+        .onAppear { takeRestoredDraft() }
         #if DEBUG
         .onAppear {
             if CommandLine.arguments.contains("--qa-dictation-demo") { dictation.showListeningForQA() }
         }
         #endif
+    }
+
+    private func takeRestoredDraft() {
+        guard let text = controller.takeRestoredDraft() else { return }
+        if dictation.isListening { dictation.finish() }
+        let current = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        draft = current.isEmpty ? text : text + "\n\n" + current
+        focused.wrappedValue = true
     }
 
     private func toggleDictation() {

@@ -49,43 +49,69 @@ public final class AgentSession {
 
     public var canSend: Bool { !isRunning }
 
-    public func send(_ text: String, attachments: [AgentAttachment] = []) {
+    /// Names the conversation the session holds. `replace` gives each
+    /// conversation it swaps in a new token, so work that started before an
+    /// await (building a provider can wait on Touch ID) can pass the token it
+    /// started with and change nothing if another conversation is shown by then.
+    public struct ConversationToken: Hashable, Sendable {
+        fileprivate let id = UUID()
+    }
+
+    public private(set) var conversationToken = ConversationToken()
+
+    /// Sends a message. With `token`, only while the session still holds that
+    /// conversation; returns whether the message was sent.
+    @discardableResult
+    public func send(_ text: String, attachments: [AgentAttachment] = [], in token: ConversationToken? = nil) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty || !attachments.isEmpty, !isRunning else { return }
+        guard !trimmed.isEmpty || !attachments.isEmpty, !isRunning, holds(token) else { return false }
         // A transcript loaded from an older version can end in an unanswered call;
         // heal it before the new turn goes after it.
         messages = AgentTranscript.healed(messages)
         append(.user(trimmed, attachments: attachments))
         start()
+        return true
     }
 
     /// Records a turn that could not start (no key, Touch ID cancelled): the
     /// message joins the transcript with the reason in a failure row under it,
-    /// so what was typed and attached is kept and `retry` can send it.
-    public func recordUnsent(_ text: String, attachments: [AgentAttachment] = [], reason: String) {
+    /// so what was typed and attached is kept and `retry` can send it. With
+    /// `token`, only while the session still holds that conversation.
+    @discardableResult
+    public func recordUnsent(_ text: String, attachments: [AgentAttachment] = [], reason: String, in token: ConversationToken? = nil) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty || !attachments.isEmpty, !isRunning else { return }
+        guard !trimmed.isEmpty || !attachments.isEmpty, !isRunning, holds(token) else { return false }
         messages = AgentTranscript.healed(messages)
         messages.append(.user(trimmed, attachments: attachments))
         fail(.setup, reason)
+        return true
     }
 
-    /// Records that a retry could not start: the latest failure row now gives
-    /// this reason, keeping what had streamed before it. Without a failure row
-    /// at the end, a new one is added.
-    public func recordSetupFailure(_ reason: String) {
-        guard !isRunning else { return }
-        let failure = AgentFailure(kind: .setup, message: reason)
+    /// Records that a retry could not start. A row for a message that was never
+    /// sent now gives this reason; any other row keeps its own failure, and what
+    /// streamed before it, and adds that the retry did not start. Without a
+    /// failure row at the end, a new one is added. With `token`, only while the
+    /// session still holds that conversation.
+    @discardableResult
+    public func recordSetupFailure(_ reason: String, in token: ConversationToken? = nil) -> Bool {
+        guard !isRunning, holds(token) else { return false }
         lastError = reason
-        guard let last = messages.indices.last, messages[last].failure != nil else {
-            append(AgentMessage(failure: failure))
-            return
+        guard let last = messages.indices.last, let current = messages[last].failure else {
+            append(AgentMessage(failure: AgentFailure(kind: .setup, message: reason)))
+            return true
+        }
+        var updated = current
+        if current.kind == .setup {
+            updated.message = reason
+        } else {
+            updated.retryError = reason
         }
         messages[last].blocks = messages[last].blocks.map { block in
-            if case .failure = block { return .failure(failure) }
+            if case .failure = block { return .failure(updated) }
             return block
         }
         transcriptDidChange?()
+        return true
     }
 
     /// True when the conversation ends in a failure row that `retry` can run again.
@@ -97,19 +123,26 @@ public final class AgentSession {
     /// with the reply it ended if that reply finished the turn (cut off,
     /// refused, stopped), and the model answers again from the last user turn
     /// or tool results. The user's message is not repeated, and completed tool
-    /// rounds are not run again.
-    public func retry() {
-        guard canRetry else { return }
+    /// rounds are not run again. With `token`, only while the session still
+    /// holds that conversation; returns whether the turn started.
+    @discardableResult
+    public func retry(in token: ConversationToken? = nil) -> Bool {
+        guard canRetry, holds(token) else { return false }
         var kept = messages
         kept.removeLast()
         while let last = kept.last, last.role == .assistant, last.failure == nil {
             kept.removeLast()
         }
         kept = AgentTranscript.healed(kept)
-        guard AgentTranscript.repaired(kept).last?.role == .user else { return }
+        guard AgentTranscript.repaired(kept).last?.role == .user else { return false }
         messages = kept
         transcriptDidChange?()
         start()
+        return true
+    }
+
+    private func holds(_ token: ConversationToken?) -> Bool {
+        token.map { $0 == conversationToken } ?? true
     }
 
     /// Stops the current reply or tool call. Pending tool calls get error results so the transcript stays valid.
@@ -141,6 +174,7 @@ public final class AgentSession {
             task = nil
         }
         self.messages = AgentTranscript.healed(messages)
+        conversationToken = ConversationToken()
         lastError = nil
     }
 

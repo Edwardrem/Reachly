@@ -87,24 +87,32 @@ public struct AgentFailure: Codable, Sendable, Equatable {
 
     public var kind: Kind
     public var message: String
+    /// Why the latest Retry of this turn could not start (no key, Touch ID
+    /// cancelled). The original failure stays: the reply did fail that way.
+    public var retryError: String?
 
-    public init(kind: Kind, message: String) {
+    public init(kind: Kind, message: String, retryError: String? = nil) {
         self.kind = kind
         self.message = message
+        self.retryError = retryError
     }
 
-    /// One sentence for the transcript and the clipboard. Provider and setup
-    /// errors are prefixed with what failed; the other messages already say it.
+    /// The failure in a sentence or two for the transcript and the clipboard.
+    /// Provider and setup errors are prefixed with what failed; the other
+    /// messages already say it.
     public var summary: String {
-        switch kind {
+        let failure = switch kind {
         case .setup: "Not sent: \(message)"
         case .error: "The request failed: \(message)"
         case .unreadable, .cutOff, .refusal, .interrupted, .toolRounds, .stopped: message
         }
+        guard let retryError else { return failure }
+        let separator = failure.hasSuffix(".") ? " " : ". "
+        return failure + separator + "Retry did not start: \(retryError)"
     }
 
     private enum CodingKeys: String, CodingKey {
-        case kind, message
+        case kind, message, retryError = "retry_error"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -112,6 +120,7 @@ public struct AgentFailure: Codable, Sendable, Equatable {
         // A kind added by a later version reads as a plain error instead of failing the whole transcript.
         kind = Kind(rawValue: try container.decodeIfPresent(String.self, forKey: .kind) ?? "") ?? .error
         message = try container.decodeIfPresent(String.self, forKey: .message) ?? ""
+        retryError = try container.decodeIfPresent(String.self, forKey: .retryError)
     }
 }
 
