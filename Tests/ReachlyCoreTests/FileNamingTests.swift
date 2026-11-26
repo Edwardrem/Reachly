@@ -49,6 +49,30 @@ import Testing
         }
     }
 
+    // MARK: pathComponentError
+
+    @Test func namesThatCantStandForOneItemAreRefused() {
+        #expect(FileNaming.pathComponentError(for: "") == "The name is empty.")
+        #expect(FileNaming.pathComponentError(for: "..") != nil)
+        #expect(FileNaming.pathComponentError(for: "../x") == "Names can't contain a slash.")
+        #expect(FileNaming.pathComponentError(for: "a\u{0}") == "Names can't contain a null character.")
+        #expect(FileNaming.pathComponentError(for: String(repeating: "a", count: 256)) == "That name is too long.")
+    }
+
+    @Test func blankNamesStandForOneItem() {
+        // Unusual, but each names exactly one file in its folder.
+        #expect(FileNaming.pathComponentError(for: " ") == nil)
+        #expect(FileNaming.pathComponentError(for: "\t") == nil)
+        #expect(FileNaming.pathComponentError(for: "report.txt") == nil)
+    }
+
+    @Test func displayedNamesHideControlCharactersAndStayShort() {
+        #expect(FileNaming.displayed("a\u{0}b\nc") == "a\u{FFFD}b\u{FFFD}c")
+        #expect(FileNaming.displayed("../x") == "../x")
+        let long = FileNaming.displayed(String(repeating: "x", count: 300))
+        #expect(long.count == 61 && long.hasSuffix("…"))
+    }
+
     // MARK: copyName
 
     @Test func fileCopiesKeepTheExtension() {

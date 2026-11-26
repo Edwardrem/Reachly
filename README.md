@@ -95,6 +95,11 @@ conversations. Your real hosts never leave your Mac.
   delete, new folder, show hidden files, and Open / Open With… for remote
   files, which are uploaded again whenever the editor saves them. Transfers
   pipeline 16 requests of 32 KiB and resume from where they stopped.
+  Everything a transfer writes stays inside the folder it was sent to: a
+  name a host lists that can't stand for one file (such as `../x`, or one with
+  a slash or a null character) stops the transfer with a message naming it,
+  and links to folders and special files inside a folder are left out and
+  reported.
 
   The panes also offer New File…, Duplicate, Move to…, and Copy, Cut and
   Paste (⌘C, ⌘X, ⌘V while a file list has focus) within a side or between

@@ -1,5 +1,6 @@
 import Foundation
 import NIOCore
+import ReachlyCore
 import Synchronization
 
 /// An SFTP session on an `SSHConnection`: directory listings, file metadata,
@@ -224,6 +225,18 @@ public final class SFTPClient: @unchecked Sendable {
         return entries
     }
 
+    /// `listDirectory`, refusing a name that can't stand for one item in the folder ("../x", "a/b", one with a null
+    /// character): joined to `path`, it would reach somewhere else. For walks that act on what they list.
+    private func listingSafely(_ path: String) async throws -> [SFTP.Entry] {
+        let entries = try await listDirectory(path)
+        for entry in entries {
+            if let reason = FileNaming.pathComponentError(for: entry.name) {
+                throw TransferPathError.unusableName(entry.name, folder: path, reason: reason)
+            }
+        }
+        return entries
+    }
+
     public func makeDirectory(_ path: String, mode: UInt32? = nil) async throws {
         let (type, reply) = try await request(.mkdir) { writer in
             writer.writeString(path)
@@ -261,7 +274,7 @@ public final class SFTPClient: @unchecked Sendable {
             try await remove(path)
             return
         }
-        for entry in try await listDirectory(path) {
+        for entry in try await listingSafely(path) {
             try Task.checkCancellation()
             try await removeRecursively(SFTP.join(path, entry.name))
         }
@@ -346,7 +359,7 @@ public final class SFTPClient: @unchecked Sendable {
 
     private func copyEntries(in folder: String, relativeTo base: String = "") async throws -> [CopyEntry] {
         var entries: [CopyEntry] = []
-        for entry in try await listDirectory(folder).sorted(by: { $0.name < $1.name }) {
+        for entry in try await listingSafely(folder).sorted(by: { $0.name < $1.name }) {
             try Task.checkCancellation()
             let relative = base.isEmpty ? entry.name : base + "/" + entry.name
             let full = SFTP.join(folder, entry.name)
@@ -521,7 +534,7 @@ public final class SFTPClient: @unchecked Sendable {
             return
         }
         try? await setPermissions(0o700, path: path)
-        for entry in try await listDirectory(path) {
+        for entry in try await listingSafely(path) {
             try? await removeCopiedTree(SFTP.join(path, entry.name))
         }
         try await removeDirectory(path)

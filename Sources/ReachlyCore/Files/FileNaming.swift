@@ -14,11 +14,27 @@ public enum FileNaming {
     /// nil when `name` can be used as one file or folder name; otherwise a short reason to show the user.
     public static func validationError(for name: String) -> String? {
         if name.allSatisfy(\.isWhitespace) { return "Enter a name." }
+        return pathComponentError(for: name)
+    }
+
+    /// nil when `name` stands for exactly one item in a folder, so joining it to the folder's path stays in that
+    /// folder; otherwise a short reason. Use it for names a host or a folder listing supplies: unlike
+    /// `validationError`, a name of only spaces passes, as it is unusual but harmless.
+    public static func pathComponentError(for name: String) -> String? {
+        if name.isEmpty { return "The name is empty." }
         if name == "." || name == ".." { return "“.” and “..” can't be used as names." }
         if name.contains("/") { return "Names can't contain a slash." }
         if name.unicodeScalars.contains("\0") { return "Names can't contain a null character." }
         if name.utf8.count > maximumNameBytes { return "That name is too long." }
         return nil
+    }
+
+    /// `name` as a message can show it: control characters (a null among them) become "�", and a long name is
+    /// shortened with "…".
+    public static func displayed(_ name: String) -> String {
+        var shown = String(String.UnicodeScalarView(name.unicodeScalars.map { $0.properties.generalCategory == .control ? "\u{FFFD}" : $0 }))
+        if shown.count > 60 { shown = String(shown.prefix(60)) + "…" }
+        return shown
     }
 
     /// The Finder-style name for a copy that is not in `existing`: "report copy.txt", then "report copy 2.txt", …
