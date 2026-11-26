@@ -301,13 +301,42 @@ struct ClaudeSettingsView: View {
     private var qoderSection: some View {
         TextField("Qoder CLI", text: Binding(
             get: { settings.configuration.acpCommandPath ?? "" },
-            set: { settings.configuration.acpCommandPath = $0.isEmpty ? nil : $0 }), prompt: Text("/usr/local/bin/qoder"))
+            set: { settings.configuration.acpCommandPath = $0.isEmpty ? nil : $0 }), prompt: Text("Path to the Qoder CLI (which qoder)"))
             .font(.body.monospaced())
+        if let path = settings.configuration.acpCommandPath?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
+            qoderPathCheck(path)
+        }
         Text("When you send a message in the chat panel, Reachly runs this CLI in ACP mode (--acp), in a folder of its own under Application Support. Qoder uses its own sign-in and models, which Reachly never reads. It reaches your servers only through Reachly's MCP server, under the same guardrails, approval sheet and audit log. Qoder's own tools run on this Mac under Qoder's rules, and Reachly asks you before each one. Use in Chat Panel on the Qoder row below fills this in.")
             .font(.caption)
             .foregroundStyle(.secondary)
         if !mcp.isEnabled {
             Label("Turn on the MCP server below: Qoder reaches your servers through it.", systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        }
+    }
+
+    /// Where the chosen path leads, checked the way the panel checks it before each start.
+    @ViewBuilder
+    private func qoderPathCheck(_ path: String) -> some View {
+        switch ACPLaunch.resolveExecutable(path) {
+        case .success(let resolved) where resolved != path:
+            Text("Runs \(resolved)")
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+        case .success:
+            EmptyView()
+        case .failure(.insideAppBundle(let resolved)):
+            Label("This leads to \(resolved), inside an app bundle: that is the Qoder editor's launcher, not the Qoder CLI. Reachly won't run it.", systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        case .failure(.missing):
+            Label("Nothing is at this path.", systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        case .failure(.notExecutable):
+            Label("This isn't a program Reachly can run.", systemImage: "exclamationmark.triangle.fill")
                 .font(.caption)
                 .foregroundStyle(.orange)
         }

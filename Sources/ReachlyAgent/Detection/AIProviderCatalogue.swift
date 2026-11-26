@@ -513,9 +513,10 @@ public enum AIProviderCatalogue {
         case .useQoderInChat:
             guard let cli = machine.qoder?.cliPath else { return notFound("The Qoder CLI") }
             let command = MCPConnectCommand(executable: cli, arguments: ["--acp"])
+            let target = machine.qoder?.cliTarget.map { " \(cli) leads to \($0), which is the file that runs; Reachly checks where it leads each time it starts Qoder, and never runs one inside an app bundle (that is the Qoder editor's launcher)." } ?? ""
             return AIProviderPrompt(
                 title: "Use Qoder in the chat panel?",
-                message: "Reachly selects Qoder (ACP) as the chat panel's provider. When you send a message there, Reachly runs this command and talks to it over the Agent Client Protocol; if Qoder doesn't take --acp, Reachly runs it with acp instead. It runs in a folder Reachly made for it in Application Support, not your home folder, and signs in with Qoder's own sign-in, which Reachly never reads. Qoder reaches your servers only through Reachly's MCP server, so its commands there go through Reachly's guardrails, approval sheet and audit log. Qoder's own tools run on this Mac under Qoder's rules, and Reachly asks you before each one it wants to use.\(serverNote)",
+                message: "Reachly selects Qoder (ACP) as the chat panel's provider. When you send a message there, Reachly runs this command and talks to it over the Agent Client Protocol; only if Qoder says it doesn't know --acp does Reachly run it with acp instead.\(target) It runs in a folder Reachly made for it in Application Support, not your home folder, and signs in with Qoder's own sign-in, which Reachly never reads. Qoder reaches your servers only through Reachly's MCP server, so its commands there go through Reachly's guardrails, approval sheet and audit log. Qoder's own tools run on this Mac under Qoder's rules, and Reachly asks you before each one it wants to use.\(serverNote)",
                 detail: command.displayString(home: home),
                 confirmTitle: "Use Qoder",
                 command: command)

@@ -14,7 +14,9 @@ public final class ACPAgent: ExternalAgent {
         /// Who answers, in messages ("Qoder").
         public var name: String
         public var executable: String
-        /// Tried in order until one answers `initialize`. Qoder's docs give `--acp`; Zed's listing gives `acp`.
+        /// The first is tried first. A later one is tried only when the agent exits saying it doesn't know an
+        /// argument (`unknown option '--acp'`), and then the next one without that argument: never after a
+        /// timeout, a sign-in error or a crash. Qoder's docs give `--acp`; Zed's listing gives `acp`.
         public var argumentSets: [[String]]
         public var environment: [String: String]
         /// The agent's working directory and every session's `cwd`: a folder Reachly owns, never the home folder.
@@ -181,8 +183,10 @@ public final class ACPAgent: ExternalAgent {
     private func connect() async throws -> ACPConnection {
         if let connection, connection.isOpen, agentInfo != nil { return connection }
         shutdown()
-        var problem = ""
-        for arguments in configuration.argumentSets {
+        let sets = configuration.argumentSets
+        var index = 0
+        while index < sets.count {
+            let arguments = sets[index]
             try Task.checkCancellation()
             let transport: any ACPTransport
             do {
@@ -218,16 +222,34 @@ public final class ACPAgent: ExternalAgent {
                 throw CancellationError()
             } catch {
                 connection.close()
-                if case ACPError.agentExited(let exit) = error {
-                    problem = Self.errorSummary(exit.standardError).map { " It said: \($0)" } ?? ""
-                } else if case ACPError.timedOut = error {
-                    problem = " It didn't answer within \(configuration.initializeTimeout.components.seconds) seconds."
-                } else {
-                    problem = " " + (error.localizedDescription)
+                // Another form only for an argument the agent said it doesn't know.
+                if case ACPError.agentExited(let exit) = error, !exit.wasStopped,
+                   let refused = ACPLaunch.refusedArgument(in: exit.standardError, among: arguments),
+                   let next = sets.indices.dropFirst(index + 1).first(where: { !sets[$0].contains(refused) }) {
+                    index = next
+                    continue
                 }
+                throw startFailure(error)
             }
         }
-        throw ExternalAgentFailure(kind: .setup, message: "\(name) didn't start in ACP mode.\(problem)")
+        throw ExternalAgentFailure(kind: .setup, message: "\(name) didn't start in ACP mode.")
+    }
+
+    /// Why the agent didn't start, for the failure row.
+    private func startFailure(_ error: any Error) -> ExternalAgentFailure {
+        let problem: String
+        switch error as? ACPError {
+        case .rpc(_, let code, _)? where code == ACPError.authRequiredCode:
+            return failure(for: error, during: "starting")
+        case .agentExited(let exit)?:
+            let status = exit.status.map { " (exit status \($0))" } ?? ""
+            problem = " It stopped\(status)." + (Self.errorSummary(exit.standardError).map { " It said: \($0)" } ?? "")
+        case .timedOut?:
+            problem = " It didn't answer within \(configuration.initializeTimeout.components.seconds) seconds."
+        default:
+            problem = " " + error.localizedDescription
+        }
+        return ExternalAgentFailure(kind: .setup, message: "\(name) didn't start in ACP mode.\(problem)")
     }
 
     /// The conversation's session in the running agent: the live one, the one it had before when the agent can

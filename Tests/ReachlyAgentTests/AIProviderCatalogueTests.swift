@@ -274,6 +274,12 @@ struct AIProviderCatalogueTests {
         #expect(shown.message.contains("guardrails, approval sheet and audit log"))
         #expect(shown.message.contains("not your home folder"))
         #expect(shown.message.contains("turned on too"))
+        #expect(!shown.message.contains("leads to"), "a plain file says nothing about links")
+
+        machine.qoder?.cliTarget = "/Users/me/.qoder/versions/1.2.0/qodercli"
+        let linked = try #require(AIProviderCatalogue.prompt(for: .useQoderInChat, machine: machine, reachly: reachly(), home: home))
+        #expect(linked.message.contains("/Users/me/.local/bin/qoder leads to /Users/me/.qoder/versions/1.2.0/qodercli, which is the file that runs"))
+        #expect(linked.message.contains("never runs one inside an app bundle"))
         let gone = try #require(AIProviderCatalogue.prompt(for: .useQoderInChat, machine: thisMac, reachly: reachly(), home: home))
         #expect(gone.confirmTitle == nil, "the app alone can't chat")
     }

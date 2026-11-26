@@ -59,6 +59,11 @@ enum FakeACPAgent {
             FileHandle.standardError.write(Data("error: unknown option '--acp'\n".utf8))
             exit(2)
         }
+        if scenario == "init-crash" {
+            // Dies before it answers anything, with nothing about its arguments.
+            FileHandle.standardError.write(Data("panic: the config file is broken\n".utf8))
+            exit(1)
+        }
         Thread.detachNewThread {
             while let line = readLine(strippingNewline: true) {
                 log(line)
@@ -83,6 +88,10 @@ enum FakeACPAgent {
             case "initialize":
                 guard let id else { continue }
                 if scenario == "silent-init" { continue }
+                if scenario == "init-auth" {
+                    respond(id, errorCode: -32000, message: "Authentication required")
+                    continue
+                }
                 respond(id, result: [
                     "protocolVersion": 1,
                     "agentCapabilities": ["loadSession": scenario == "loadable", "promptCapabilities": ["image": false, "audio": false, "embeddedContext": true]],

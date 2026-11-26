@@ -637,16 +637,87 @@ struct ACPAgentProcessTests {
         #expect(run.texts.last == "Done.")
     }
 
-    @Test func anAgentThatNeverInitializesIsASetupFailure() async throws {
+    @Test func anAgentThatNeverInitializesIsASetupFailureAndIsNotTriedAgain() async throws {
         let run = FakeACPRun("silent-init", initializeTimeout: .seconds(1))
         defer { run.finish() }
         await #expect {
             _ = try await run.run()
         } throws: { error in
             guard let failure = error as? ExternalAgentFailure else { return false }
-            return failure.kind == .setup && failure.message.contains("didn't start in ACP mode")
+            return failure.kind == .setup && failure.message.contains("didn't start in ACP mode") && failure.message.contains("within 1 seconds")
         }
-        #expect(run.launches.count == 2, "both forms were tried")
+        #expect(run.launches == ["ARGV --acp"], "a timeout is not a refused argument")
+    }
+
+    @Test func aCrashOrASignInErrorAtStartIsNotTriedAgain() async throws {
+        let crash = FakeACPRun("init-crash")
+        defer { crash.finish() }
+        await #expect {
+            _ = try await crash.run()
+        } throws: { error in
+            guard let failure = error as? ExternalAgentFailure else { return false }
+            return failure.kind == .setup && failure.message.contains("exit status 1") && failure.message.contains("the config file is broken")
+        }
+        #expect(crash.launches == ["ARGV --acp"])
+
+        let auth = FakeACPRun("init-auth")
+        defer { auth.finish() }
+        await #expect {
+            _ = try await auth.run()
+        } throws: { error in
+            (error as? ExternalAgentFailure)?.message == "Qoder isn't signed in (Authentication required). Run `qoder login` in Terminal, then Retry."
+        }
+        #expect(auth.launches == ["ARGV --acp"])
+    }
+
+    @Test func aRefusedArgumentIsReadFromWhatTheAgentSaid() {
+        let sets = ["--acp", "--permission-mode", "default"]
+        #expect(ACPLaunch.refusedArgument(in: "error: unknown option '--acp'\n", among: ["--acp"]) == "--acp")
+        #expect(ACPLaunch.refusedArgument(in: "error: unexpected argument '--acp' found\n\nUsage: qoder [OPTIONS]", among: ["--acp"]) == "--acp")
+        #expect(ACPLaunch.refusedArgument(in: "Error: unknown flag: --permission-mode", among: sets) == "--permission-mode")
+        #expect(ACPLaunch.refusedArgument(in: "error: unknown command 'acp'", among: ["acp"]) == "acp")
+        #expect(ACPLaunch.refusedArgument(in: "Unknown arguments: acp, foo", among: ["acp"]) == "acp")
+        #expect(ACPLaunch.refusedArgument(in: "panic: index out of range", among: ["--acp"]) == nil, "a crash is not a refusal")
+        #expect(ACPLaunch.refusedArgument(in: "Authentication required", among: ["--acp"]) == nil)
+        #expect(ACPLaunch.refusedArgument(in: "error: unknown option '--verbose'", among: ["--acp"]) == nil, "it must name one of ours")
+        #expect(ACPLaunch.refusedArgument(in: "warning: --acp is unrecognised here", among: ["acp", "--acp"]) == "--acp", "the longest match wins")
+    }
+
+    @Test func anAppBundleIsNeverRunEvenThroughALink() throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "reachly-launch-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let launcher = directory.appending(path: "Qoder.app/Contents/Resources/app/bin/qoder")
+        try FileManager.default.createDirectory(at: launcher.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: launcher.path, contents: Data("#!/bin/sh\n".utf8), attributes: [.posixPermissions: 0o755])
+        let cli = directory.appending(path: "cli/qoder")
+        try FileManager.default.createDirectory(at: cli.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: cli.path, contents: Data("#!/bin/sh\n".utf8), attributes: [.posixPermissions: 0o755])
+        let link = directory.appending(path: "bin/qoder")
+        try FileManager.default.createDirectory(at: link.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: cli.path)
+
+        let resolvedCLI = cli.resolvingSymlinksInPath().standardizedFileURL.path
+        #expect(ACPLaunch.resolveExecutable(link.path) == .success(resolvedCLI), "the file that runs is the link's target")
+        // The link is pointed into the editor's bundle later: the next start refuses it.
+        try FileManager.default.removeItem(at: link)
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: launcher.path)
+        guard case .failure(.insideAppBundle(let resolved)) = ACPLaunch.resolveExecutable(link.path) else {
+            Issue.record("a link into Qoder.app must be refused")
+            return
+        }
+        #expect(resolved.hasSuffix("Qoder.app/Contents/Resources/app/bin/qoder"))
+        #expect(ACPLaunch.resolveExecutable(launcher.path) == .failure(.insideAppBundle(resolved: launcher.resolvingSymlinksInPath().standardizedFileURL.path)), "typed in directly too")
+        #expect(ACPLaunch.resolveExecutable(directory.appending(path: "nothing").path) == .failure(.missing))
+        #expect(ACPLaunch.resolveExecutable(directory.path) == .failure(.notExecutable))
+    }
+
+    @Test func appBundlesAreFoundByWholePathComponentsInAnyCase() {
+        #expect(AIProviderLocations.isInsideAppBundle("/Applications/Qoder.app/Contents/Resources/app/bin/qoder"))
+        #expect(AIProviderLocations.isInsideAppBundle("/Applications/QODER.APP/Contents/MacOS/qoder"))
+        #expect(AIProviderLocations.isInsideAppBundle("/Users/me/Applications/Qoder.app/bin/qoder"), "with or without Contents")
+        #expect(!AIProviderLocations.isInsideAppBundle("/opt/my.apps/bin/qoder"))
+        #expect(!AIProviderLocations.isInsideAppBundle("/Users/me/.local/bin/qoder"))
+        #expect(!AIProviderLocations.isInsideAppBundle("/usr/local/bin/qoder.app"), "only folders on the way count")
     }
 
     @Test func stopWhileTheAgentStartsEndsAtOnce() async throws {

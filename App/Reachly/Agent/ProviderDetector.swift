@@ -94,7 +94,8 @@ final class ProviderDetector {
         }
         let qoderApp = app(.qoder, home: homePath)
         if qoderApp || qoderPath != nil {
-            facts.qoder = .init(appInstalled: qoderApp, cliPath: qoderPath, config: MCPClientConfigFile.qoder(home: home).state())
+            let target = qoderPath.flatMap { path in try? ACPLaunch.resolveExecutable(path).get() }
+            facts.qoder = .init(appInstalled: qoderApp, cliPath: qoderPath, cliTarget: target == qoderPath ? nil : target, config: MCPClientConfigFile.qoder(home: home).state())
         }
         let openAI = AIProviderMachineFacts.OpenAIApps(chatGPTApp: app(.chatGPT, home: homePath), codexApp: app(.codex, home: homePath), codexCLIPath: codexPath)
         if openAI.isFound { facts.openAI = openAI }

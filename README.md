@@ -121,8 +121,11 @@ conversations. Your real hosts never leave your Mac.
   `read_terminal_buffer`, runs commands in a dedicated agent tab you can watch
   and stop with Esc, and conversations are saved per host or group.
 - **Qoder in the chat panel**: choose Qoder (ACP) and the panel runs the Qoder
-  CLI as an Agent Client Protocol agent (`qoder --acp`, or `qoder acp`), one
-  process for the panel, in a folder of its own under Application Support.
+  CLI as an Agent Client Protocol agent (`qoder --acp`, or `qoder acp` only
+  when it says it doesn't know `--acp`), one process for the panel, in a
+  folder of its own under Application Support. Before each start Reachly
+  follows the chosen path's links and runs the file they lead to, never one
+  inside an app bundle (the Qoder editor's own `qoder` launcher).
   Qoder uses its own sign-in and models, which Reachly never reads. Reachly
   advertises no file system or terminal access and hands Qoder its own MCP
   bridge, so every command on a server goes through the guardrails, the

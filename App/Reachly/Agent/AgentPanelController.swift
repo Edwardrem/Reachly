@@ -455,17 +455,26 @@ final class AgentPanelController {
         guard let command = configuration.acpCommandPath?.trimmingCharacters(in: .whitespacesAndNewlines), !command.isEmpty else {
             throw AgentSetupError(message: "Choose the \(name) CLI first: in Settings › AI Integration, click Use in Chat Panel on the Qoder row.")
         }
-        guard FileManager.default.isExecutableFile(atPath: command) else {
+        // Where the path leads now, through any links: that file runs, and never one inside an app bundle.
+        let executable: String
+        switch ACPLaunch.resolveExecutable(command) {
+        case .success(let resolved):
+            executable = resolved
+        case .failure(.missing):
             throw AgentSetupError(message: "The \(name) CLI isn't at \(command) any more. Click Check Again in Settings › AI Integration, then Use in Chat Panel.")
+        case .failure(.notExecutable):
+            throw AgentSetupError(message: "\(command) isn't a program Reachly can run. Choose the \(name) CLI in Settings › AI Integration.")
+        case .failure(.insideAppBundle(let resolved)):
+            throw AgentSetupError(message: "\(command) leads to \(resolved), inside an app bundle: that is the \(name) editor's launcher, not the \(name) CLI, so Reachly won't run it. Install the CLI (docs.qoder.com/en/cli/quick-start), then click Check Again in Settings › AI Integration and Use in Chat Panel.")
         }
         guard let mcpServer, mcpServer.isRunning else {
             throw AgentSetupError(message: "\(name) reaches your servers only through Reachly's MCP server, which is off. Turn it on (the button above, or Settings › AI Integration › MCP server), then Retry.")
         }
-        if let externalAgent, externalAgent.configuration.executable == command {
+        if let externalAgent, externalAgent.configuration.executable == executable {
             return externalAgent
         }
         stopExternalAgent()
-        let agent = ACPAgent(configuration: Self.externalAgentConfiguration(name: name, command: command, bridgePath: mcpServer.bridgePath))
+        let agent = ACPAgent(configuration: Self.externalAgentConfiguration(name: name, command: command, executable: executable, bridgePath: mcpServer.bridgePath))
         agent.permissionHandler = { [toolHost] request in await toolHost.askPermission(request) }
         // A command Qoder asked for through the MCP server is not left in its sheet once the turn is over.
         agent.turnEndHandler = { [toolHost] key in
@@ -490,13 +499,14 @@ final class AgentPanelController {
     /// environment and the usual bin folders on PATH, and Reachly's stdio MCP bridge in every session. The
     /// bridge finds the server's port and token in Reachly's data folder itself, so no token is handed over,
     /// and it tells the server which conversation the commands belong to.
-    static func externalAgentConfiguration(name: String, command: String, bridgePath: String) -> ACPAgent.Configuration {
+    /// `command` is the path chosen in Settings and `executable` the file it leads to, which is what runs.
+    static func externalAgentConfiguration(name: String, command: String, executable: String, bridgePath: String) -> ACPAgent.Configuration {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let dataDirectory = AppPaths.applicationSupport.path
         let binary = URL(fileURLWithPath: command).lastPathComponent
         return ACPAgent.Configuration(
             name: name,
-            executable: command,
+            executable: executable,
             argumentSets: [["--acp"], ["acp"]],
             environment: ProviderDetector.toolEnvironment(for: command, home: home),
             workingDirectory: externalAgentWorkspace,
