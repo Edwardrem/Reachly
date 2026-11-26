@@ -38,6 +38,9 @@ encrypted `.reachly` file. The full plan is in
 - **Live or seeded:** the demo video's AI scenes ran live, with CAIMEx and real SSH to four Docker servers. The
   finished conversation in the chat screenshots is seeded by a Debug-only flag that release builds don't contain.
   See [What is live and what is seeded](docs/SECURITY.md#what-is-live-and-what-is-seeded).
+- **Rerun the demo:** [demo/](demo/) starts the video's four servers in Docker with the same incident.
+  [`demo/measure.py`](demo/measure.py) measures a run from Reachly's audit log, the same way the proposed pilot
+  would.
 - **Updates:** the app checks for new versions and offers the download. Builds are ad-hoc signed, so updates can't
   install in place until builds are signed with an Apple Developer ID.
 

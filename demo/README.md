@@ -116,8 +116,9 @@ Permission modes:
    Each command now waits in the approval sheet, for you to approve, edit or deny it.
 
 A different model, or the same one on another day, takes a different path, so your counts will differ from the
-video's. Builds newer than the video also have a stricter command guard, so a read-only host may refuse a few
-commands the video shows running. The incident is the same.
+video's. The incident is the same. Replayed through the stricter command guard of Reachly 1.1.3, the video's commands
+get the same verdicts on the read-only hosts, with one exception: a `curl -s -o /dev/null` health check that 1.1.2
+refused now runs.
 
 ## Measure the run
 
