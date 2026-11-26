@@ -572,6 +572,54 @@ struct SFTPFileOpsLiveTests {
         }
     }
 
+    @Test func aRetryNeverWritesIntoAFileThatTookThePlaceOfItsOwn() async throws {
+        try await withScratch { sftp, root in
+            try await Self.withLocalFolder { folder in
+                let size = 3 * 1024 * 1024 + 11
+                let local = folder.appending(path: "big.bin")
+                try Self.bytes(size, seed: 5).write(to: local)
+                let target = root + "/big.bin"
+
+                for resume in [true, false] {
+                    // The first attempt stops after its first batch.
+                    let claim = SFTPClient.TargetClaim()
+                    let first = Task {
+                        try await sftp.upload(local, to: target, overwrite: .never(claim)) { transferred, _ in
+                            if transferred > 0 { withUnsafeCurrentTask { $0?.cancel() } }
+                        }
+                    }
+                    #expect(await first.result.error is CancellationError)
+                    let made = try await sftp.stat(target)
+                    let partial = try #require(made.size)
+
+                    // Someone puts another file in its place: same name, size, owner and permissions, other bytes.
+                    let replacement = Self.bytes(Int(partial), seed: 77)
+                    try await sftp.remove(target)
+                    try await sftp.writeFile(replacement, to: target)
+                    let error = await Self.error { try await sftp.upload(local, to: target, resume: resume, overwrite: .never(claim)) }
+                    #expect(error?.localizedDescription.contains("already exists") == true, "\(String(describing: error))")
+                    #expect(try await sftp.readFile(target) == replacement)
+
+                    // Rewritten in place (the same file on the server, new bytes) it is refused too.
+                    try await sftp.writeFile(Self.bytes(Int(partial) + 5, seed: 78), to: target)
+                    #expect(await Self.error { try await sftp.upload(local, to: target, resume: resume, overwrite: .never(claim)) } != nil)
+                    #expect(try await sftp.readFile(target) == Self.bytes(Int(partial) + 5, seed: 78))
+
+                    // Even holding the very bytes it had sent, a file with other permissions is not taken for its own.
+                    let sentBytes = Data(try Data(contentsOf: local).prefix(Int(partial)))
+                    let otherMode: UInt32 = made.mode == 0o600 ? 0o640 : 0o600
+                    try await sftp.remove(target)
+                    try await sftp.writeFile(sentBytes, to: target)
+                    try await sftp.setPermissions(otherMode, path: target)
+                    #expect(await Self.error { try await sftp.upload(local, to: target, resume: resume, overwrite: .never(claim)) } != nil)
+                    #expect(try await sftp.readFile(target) == sentBytes)
+                    #expect(try await sftp.stat(target).mode == otherMode)
+                    try await sftp.remove(target)
+                }
+            }
+        }
+    }
+
     @Test func anExclusiveDownloadRefusesAnExistingLocalFileAndRetriesItsOwn() async throws {
         try await withScratch { sftp, root in
             try await Self.withLocalFolder { folder in

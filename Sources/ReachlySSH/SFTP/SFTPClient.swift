@@ -562,6 +562,23 @@ public final class SFTPClient: @unchecked Sendable {
         return try expectHandle(type, &reader, path: path)
     }
 
+    /// The attributes of the file open as `handle`. `path` is only for error messages.
+    public func fstat(handle: [UInt8], path: String) async throws -> SFTP.Attributes {
+        let (type, reply) = try await request(.fstat) { $0.writeBytes(handle) }
+        var reader = reply
+        return try expectAttributes(type, &reader, path: path)
+    }
+
+    /// Sets attributes (a size truncates or extends) on the file open as `handle`.
+    public func setAttributes(_ attributes: SFTP.Attributes, handle: [UInt8]) async throws {
+        let (type, reply) = try await request(.fsetstat) { writer in
+            writer.writeBytes(handle)
+            attributes.encode(into: &writer)
+        }
+        var reader = reply
+        _ = try expectStatus(type, &reader, path: nil)
+    }
+
     public func closeHandle(_ handle: [UInt8]) async throws {
         let (type, reply) = try await request(.close) { $0.writeBytes(handle) }
         var reader = reply
@@ -694,7 +711,7 @@ public final class SFTPClient: @unchecked Sendable {
         defer { try? file.close() }
         // The size of what is open (through a symlink, the file it leads to).
         let total = Int64(try file.seekToEnd())
-        let (handle, start) = try await openUploadTarget(remotePath, resume: resume, mode: mode, total: total, overwrite: overwrite)
+        let (handle, start) = try await openUploadTarget(remotePath, from: localURL, resume: resume, mode: mode, total: total, overwrite: overwrite)
         var offset = start
         try file.seek(toOffset: offset)
         var transferred = Int64(offset)
@@ -715,6 +732,8 @@ public final class SFTPClient: @unchecked Sendable {
                     }
                     try await group.waitForAll()
                 }
+                // Every byte before `offset` is on the server now: a retry may continue from there.
+                if case .never(let claim) = overwrite { claim.recordConfirmed(offset, at: remotePath) }
                 transferred += Int64(batch.reduce(0) { $0 + $1.1.count })
                 progress?(transferred, total)
             }
@@ -731,7 +750,7 @@ public final class SFTPClient: @unchecked Sendable {
     }
 
     /// Opens the remote file an upload writes into and the offset to start at.
-    private func openUploadTarget(_ path: String, resume: Bool, mode: UInt32?, total: Int64, overwrite: Overwrite) async throws -> (handle: [UInt8], offset: UInt64) {
+    private func openUploadTarget(_ path: String, from localURL: URL, resume: Bool, mode: UInt32?, total: Int64, overwrite: Overwrite) async throws -> (handle: [UInt8], offset: UInt64) {
         guard case .never(let claim) = overwrite else {
             var offset: UInt64 = 0
             if resume, let existing = try? await stat(path).size, Int64(existing) <= total {
@@ -740,26 +759,66 @@ public final class SFTPClient: @unchecked Sendable {
             let flags: SFTP.OpenFlags = offset > 0 ? [.write] : [.write, .create, .truncate]
             return (try await openFile(path, flags: flags, mode: mode), offset)
         }
-        if claim.current == .remote(path: path) {
-            // The file an earlier attempt of this transfer made: continue it, or start it over.
-            do {
-                let existing = try await lstat(path)
-                guard existing.kind == .regular else { throw Self.alreadyExists(path) }
-                var offset: UInt64 = 0
-                if resume, let size = existing.size, Int64(size) <= total {
-                    offset = size
-                }
-                let flags: SFTP.OpenFlags = offset > 0 ? [.write] : [.write, .create, .truncate]
-                return (try await openFile(path, flags: flags, mode: mode), offset)
-            } catch let error as SFTP.Error where error.isNoSuchFile {
-                // Removed since: start again with a new file.
-            }
+        if case .remote(path, let identity)? = claim.current {
+            // The file an earlier attempt of this transfer made: continue it, or start it over, while it is still it.
+            if let reopened = try await reopenOwnUpload(path, identity: identity, from: localURL, resume: resume) { return reopened }
+            // Removed since: start again with a new file.
         }
-        // Atomic on the server, and the request is not abandoned when the task is cancelled, so the claim is
+        // Atomic on the server, and the requests are not abandoned when the task is cancelled, so the claim is
         // recorded whenever the file was made.
         let handle = try await createExclusively(path, mode: mode)
-        claim.record(.remote(path: path))
+        let made = try? await uncancelled { try await self.fstat(handle: handle, path: path) }
+        claim.record(.remote(path: path, identity: RemoteFileIdentity(made)))
         return (handle, 0)
+    }
+
+    /// Opens the file an earlier attempt of a no-overwrite upload made, only while it is still that file: lstat, then
+    /// the open handle's fstat, must both fit `identity`, and the end of the confirmed bytes must read back as the
+    /// same bytes of `localURL`. Resumes after the confirmed bytes, or empties the file to start over. Returns nil
+    /// when nothing is at `path` any more; throws, touching nothing, when something else is.
+    private func reopenOwnUpload(_ path: String, identity: RemoteFileIdentity, from localURL: URL, resume: Bool) async throws -> (handle: [UInt8], offset: UInt64)? {
+        do {
+            guard identity.admits(try await lstat(path)) else { throw Self.alreadyExists(path) }
+        } catch let error as SFTP.Error where error.isNoSuchFile {
+            return nil
+        }
+        let handle: [UInt8]
+        do {
+            handle = try await openFile(path, flags: [.read, .write])
+        } catch let error as SFTP.Error where error.isNoSuchFile {
+            return nil
+        }
+        do {
+            let opened = try await fstat(handle: handle, path: path)
+            guard identity.admits(opened), try await holdsWhatWasSent(handle, size: opened.size ?? 0, identity: identity, localURL: localURL) else {
+                throw Self.alreadyExists(path)
+            }
+            if resume { return (handle, identity.confirmed) }
+            try await setAttributes(SFTP.Attributes(size: 0), handle: handle)
+            return (handle, 0)
+        } catch {
+            await closeQuietly(handle)
+            throw error
+        }
+    }
+
+    /// True when the open remote file still holds what this upload sent: the last chunk before the confirmed bytes
+    /// end (or, when none were confirmed, the start of whatever is there) matches `localURL` at the same place.
+    private func holdsWhatWasSent(_ handle: [UInt8], size: UInt64, identity: RemoteFileIdentity, localURL: URL) async throws -> Bool {
+        let chunk = UInt64(Self.chunkSize)
+        let end = identity.confirmed > 0 ? identity.confirmed : min(size, chunk)
+        let start = end - min(end, chunk)
+        guard end > start else { return true } // nothing was written: an empty file
+        var remote: [UInt8] = []
+        while UInt64(remote.count) < end - start {
+            let bytes = try await read(handle: handle, offset: start + UInt64(remote.count), length: Int(end - start) - remote.count)
+            if bytes.isEmpty { return false }
+            remote += bytes
+        }
+        let file = try FileHandle(forReadingFrom: localURL)
+        defer { try? file.close() }
+        try file.seek(toOffset: start)
+        return try file.read(upToCount: Int(end - start)).map { [UInt8]($0) } == remote
     }
 }
 
