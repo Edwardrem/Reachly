@@ -98,6 +98,11 @@ conversations. Your real hosts never leave your Mac.
   delete, new folder, show hidden files, and Open / Open With… for remote
   files, which are uploaded again whenever the editor saves them. Transfers
   pipeline 16 requests of 32 KiB and resume from where they stopped.
+  Everything a transfer writes stays inside the folder it was sent to: a
+  name a host lists that can't stand for one file (such as `../x`, or one with
+  a slash or a null character) stops the transfer with a message naming it,
+  and links to folders and special files inside a folder are left out and
+  reported.
 
   The panes also offer New File…, Duplicate, Move to…, and Copy, Cut and
   Paste (⌘C, ⌘X, ⌘V while a file list has focus) within a side or between
@@ -105,7 +110,10 @@ conversations. Your real hosts never leave your Mac.
   pane until they are pasted or the pane moves on. Nothing is overwritten:
   a taken name gets a copy name or an error, a file that appears while a paste is
   queued stops that transfer, and Cut to the other side removes the
-  originals only once everything has arrived. Every delete asks first. While
+  originals only once everything has arrived in full, and only what is
+  unchanged since the paste: a file added or changed meanwhile stays, with
+  the folder holding it (on the Mac, what is removed goes to the Trash).
+  Every delete asks first. While
   the Files window is in front, its Files menu has Reload (⌘R), New File…
   (⌥⌘N), New Folder… (⇧⌘N), Duplicate (⌘D), Move to… and Delete… (⌘⌫ while
   a file list has focus); the main window's Split Right, New Snippet and New

@@ -33,6 +33,9 @@ struct LiveServer: Sendable {
     }()
 
     static var isConfigured: Bool { current != nil }
+
+    /// True when the server runs on this Mac (the test sshd does), so a test can change its files directly.
+    var sharesThisMacsFiles: Bool { ["127.0.0.1", "localhost", "::1"].contains(host) }
 }
 
 /// Gathers shell output from the event loop so tests can wait for it.

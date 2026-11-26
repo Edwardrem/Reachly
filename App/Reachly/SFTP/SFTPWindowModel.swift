@@ -12,12 +12,14 @@ import ReachlyTerminal
 final class SFTPWindowModel {
     enum Side { case left, right }
 
-    /// A Cut pasted on the other side: `source` is deleted once every transfer queued for it completed.
+    /// A Cut pasted on the other side. Once every transfer queued for it completed, what `snapshot` lists is removed
+    /// where it is still unchanged; anything added, changed or left out stays, with the folders holding it.
     private struct PendingCut {
         let source: FileItem
         let side: FileSide
         let destinationName: String
         let transfers: [TransferItem]
+        let snapshot: CutSource
     }
 
     /// The rows a Cut put on the clipboard, in the pane they were cut from.
@@ -25,6 +27,15 @@ final class SFTPWindowModel {
         let side: Side
         let source: PaneSource
         let paths: Set<String>
+    }
+
+    /// What was queued for one item: its transfers, and for a folder the walk they came from.
+    private struct Queued {
+        var transfers: [TransferItem]
+        var plan: FolderTransfer?
+
+        /// The source paths of what the folder walk left out.
+        var skipped: [String] { plan?.skipped ?? [] }
     }
 
     /// A transfer that could not be queued, with the message to show.
@@ -136,20 +147,21 @@ final class SFTPWindowModel {
         default:
             for item in items {
                 do {
-                    _ = try await enqueue(item, from: source.source.fileSide, to: destination.source.fileSide, into: targetDirectory, as: item.name, mayReplace: true)
+                    let queued = try await enqueue(item, from: source.source.fileSide, to: destination.source.fileSide, into: targetDirectory, as: item.name, mayReplace: true)
+                    if !queued.skipped.isEmpty { status = Self.leftOutSentence(queued.skipped, of: item.name) }
                 } catch {
-                    status = error.localizedDescription
+                    status = "Could not copy “\(FileNaming.displayed(item.name))”: \(PaneModel.describe(error))"
                 }
             }
         }
     }
 
     /// Hands `item` to the queue, landing in `directory` on the other side as `name`. Returns every transfer queued
-    /// for it: none for an empty folder, whose folders are made right away.
+    /// for it (none for an empty folder, whose folders are made right away) and what its folder walk left out.
     ///
     /// With `mayReplace: false` (Paste) nothing at the destination is replaced: each file is created exclusively and
     /// a clash fails its transfer, and each folder is made new rather than filled when one appeared there since.
-    private func enqueue(_ item: FileItem, from source: FileSide, to destination: FileSide, into directory: String, as name: String, mayReplace: Bool) async throws -> [TransferItem] {
+    private func enqueue(_ item: FileItem, from source: FileSide, to destination: FileSide, into directory: String, as name: String, mayReplace: Bool) async throws -> Queued {
         switch (source, destination) {
         case (.local, .remote(let hostID)):
             return try await enqueueUpload(item, hostID: hostID, into: directory, as: name, mayReplace: mayReplace)
@@ -162,24 +174,31 @@ final class SFTPWindowModel {
         }
     }
 
-    private func enqueueUpload(_ item: FileItem, hostID: UUID, into directory: String, as name: String, mayReplace: Bool) async throws -> [TransferItem] {
+    private func enqueueUpload(_ item: FileItem, hostID: UUID, into directory: String, as name: String, mayReplace: Bool) async throws -> Queued {
         let hostName = connections.hostName(hostID)
-        let remoteRoot = SFTP.join(directory, name)
+        let remoteRoot = try TransferPath.child(name, of: directory)
         guard item.isDirectory else {
-            return [queue.enqueueUpload(hostID: hostID, hostName: hostName, localURL: URL(fileURLWithPath: item.path), to: remoteRoot, mayReplace: mayReplace)]
+            return Queued(transfers: [queue.enqueueUpload(hostID: hostID, hostName: hostName, localURL: URL(fileURLWithPath: item.path), to: remoteRoot, mayReplace: mayReplace)])
         }
-        guard let (directories, files) = Self.localTree(at: item.path, remoteRoot: remoteRoot) else {
-            throw QueueError("Could not read \(item.path).")
+        let plan: FolderTransfer
+        do {
+            plan = try await FolderTransfer.plan(from: item.path, to: remoteRoot, list: { try FolderTransfer.listLocal($0) })
+        } catch let error as TransferPathError {
+            throw error
+        } catch {
+            // Nothing is left out silently: a Cut removes the original afterwards.
+            throw QueueError("Could not read \(item.path): \(PaneModel.describe(error))")
         }
         do {
             let client = try await connections.client(for: hostID)
-            try await Self.makeRemoteFolders(directories, with: client, mayExist: mayReplace)
+            try await Self.makeRemoteFolders(plan.folders.map(\.target), with: client, mayExist: mayReplace)
         } catch {
             throw QueueError("Could not create folders on \(hostName): \(PaneModel.describe(error))")
         }
-        return files.map { url, remotePath in
-            queue.enqueueUpload(hostID: hostID, hostName: hostName, localURL: url, to: remotePath, mayReplace: mayReplace)
+        let transfers = plan.files.map { file in
+            queue.enqueueUpload(hostID: hostID, hostName: hostName, localURL: URL(fileURLWithPath: file.source), to: file.target, mayReplace: mayReplace)
         }
+        return Queued(transfers: transfers, plan: plan)
     }
 
     /// Makes the folders a transfer lands in on a host, parents first. With `mayExist`, a folder already there is
@@ -200,75 +219,65 @@ final class SFTPWindowModel {
         }
     }
 
-    /// Every folder and file under `path`, with the remote path each maps to; nil when part of it can't be read, so
-    /// nothing is left out silently (a Cut deletes the folder afterwards).
-    /// Synchronous because directory enumerators cannot be iterated from async code.
-    private nonisolated static func localTree(at path: String, remoteRoot: String) -> (directories: [String], files: [(URL, String)])? {
-        var unreadable = false
-        guard let enumerator = FileManager.default.enumerator(
-            at: URL(fileURLWithPath: path), includingPropertiesForKeys: [.isDirectoryKey], options: [],
-            errorHandler: { _, _ in
-                unreadable = true
-                return false
-            }) else { return nil }
-        var directories = [remoteRoot]
-        var files: [(URL, String)] = []
-        for case let url as URL in enumerator {
-            let relative = url.path.dropFirst(path.count).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            if (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
-                directories.append(SFTP.join(remoteRoot, relative))
-            } else {
-                files.append((url, SFTP.join(remoteRoot, relative)))
-            }
+    /// Walks a folder on a host for a transfer. A name in it that can't stand for one item stops the transfer before
+    /// anything is made (see `FolderTransfer.plan`).
+    private func planFromHost(_ item: FileItem, hostID: UUID, to root: String) async throws -> FolderTransfer {
+        let backend = RemoteBackend(hostID: hostID, connections: connections)
+        do {
+            return try await FolderTransfer.plan(from: item.path, to: root, list: { try await backend.listEntries($0) })
+        } catch let error as TransferPathError {
+            throw error
+        } catch {
+            throw QueueError("Could not read \(item.path) on \(connections.hostName(hostID)): \(PaneModel.describe(error))")
         }
-        return unreadable ? nil : (directories, files)
     }
 
-    private func enqueueDownload(_ item: FileItem, hostID: UUID, into directory: URL, as name: String, mayReplace: Bool) async throws -> [TransferItem] {
+    private func enqueueDownload(_ item: FileItem, hostID: UUID, into directory: URL, as name: String, mayReplace: Bool) async throws -> Queued {
         let hostName = connections.hostName(hostID)
-        let root = directory.appending(path: name)
+        let root = try TransferPath.child(name, of: directory.path)
         guard item.isDirectory else {
-            return [queue.enqueueDownload(hostID: hostID, hostName: hostName, remotePath: item.path, to: root, size: item.size, mayReplace: mayReplace)]
+            return Queued(transfers: [queue.enqueueDownload(hostID: hostID, hostName: hostName, remotePath: item.path, to: URL(fileURLWithPath: root), size: item.size, mayReplace: mayReplace)])
         }
-        let backend = RemoteBackend(hostID: hostID, connections: connections)
-        let tree: (directories: [String], files: [(relative: String, item: FileItem)])
+        let plan = try await planFromHost(item, hostID: hostID, to: root)
         do {
-            tree = try await backend.walk(item.path)
-        } catch {
-            throw QueueError("Could not read \(item.path) on \(hostName): \(error.localizedDescription)")
-        }
-        do {
-            for folder in [root] + tree.directories.map({ root.appending(path: $0) }) {
-                // Without intermediate folders this fails when the folder exists, so a paste never fills one that
-                // appeared since its listing.
-                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: mayReplace)
-            }
+            // Without `mayReplace` each folder must be new, so a paste never fills one that appeared since its listing.
+            try plan.makeLocalFolders(mayExist: mayReplace)
         } catch {
             throw QueueError("Could not create folders on this Mac: \(PaneModel.describe(error))")
         }
-        return tree.files.map { relative, file in
-            queue.enqueueDownload(hostID: hostID, hostName: hostName, remotePath: file.path, to: root.appending(path: relative), size: file.size, mayReplace: mayReplace)
+        let transfers = plan.files.map { file in
+            queue.enqueueDownload(hostID: hostID, hostName: hostName, remotePath: file.source, to: URL(fileURLWithPath: file.target), size: file.entry.kind == .file ? file.entry.size : nil, mayReplace: mayReplace)
         }
+        return Queued(transfers: transfers, plan: plan)
     }
 
-    private func enqueueCopy(_ item: FileItem, from fromHost: UUID, to toHost: UUID, into directory: String, as name: String, mayReplace: Bool) async throws -> [TransferItem] {
+    private func enqueueCopy(_ item: FileItem, from fromHost: UUID, to toHost: UUID, into directory: String, as name: String, mayReplace: Bool) async throws -> Queued {
         let fromName = connections.hostName(fromHost)
         let toName = connections.hostName(toHost)
-        let root = SFTP.join(directory, name)
+        let root = try TransferPath.child(name, of: directory)
         guard item.isDirectory else {
-            return [queue.enqueueCopy(fromHostID: fromHost, fromHostName: fromName, remotePath: item.path, toHostID: toHost, toHostName: toName, targetPath: root, size: item.size, mayReplace: mayReplace)]
+            return Queued(transfers: [queue.enqueueCopy(fromHostID: fromHost, fromHostName: fromName, remotePath: item.path, toHostID: toHost, toHostName: toName, targetPath: root, size: item.size, mayReplace: mayReplace)])
         }
-        let backend = RemoteBackend(hostID: fromHost, connections: connections)
+        let plan = try await planFromHost(item, hostID: fromHost, to: root)
         do {
-            let (folders, files) = try await backend.walk(item.path)
             let target = try await connections.client(for: toHost)
-            try await Self.makeRemoteFolders([root] + folders.map({ SFTP.join(root, $0) }), with: target, mayExist: mayReplace)
-            return files.map { relative, file in
-                queue.enqueueCopy(fromHostID: fromHost, fromHostName: fromName, remotePath: file.path, toHostID: toHost, toHostName: toName, targetPath: SFTP.join(root, relative), size: file.size, mayReplace: mayReplace)
-            }
+            try await Self.makeRemoteFolders(plan.folders.map(\.target), with: target, mayExist: mayReplace)
         } catch {
-            throw QueueError("Could not copy \(item.name): \(PaneModel.describe(error))")
+            throw QueueError("Could not create folders on \(toName): \(PaneModel.describe(error))")
         }
+        let transfers = plan.files.map { file in
+            queue.enqueueCopy(fromHostID: fromHost, fromHostName: fromName, remotePath: file.source, toHostID: toHost, toHostName: toName, targetPath: file.target, size: file.entry.kind == .file ? file.entry.size : nil, mayReplace: mayReplace)
+        }
+        return Queued(transfers: transfers, plan: plan)
+    }
+
+    /// Opens a file on a host in an app (Open, Open With…), unless no path can stand for its name.
+    func openRemoteFile(_ item: FileItem, hostID: UUID, chooseApplication: Bool) async {
+        if let problem = item.nameProblem {
+            status = "Could not open “\(FileNaming.displayed(item.name))”: Its name can't be used. \(problem)"
+            return
+        }
+        await openWith.open(hostID: hostID, remotePath: item.path, chooseApplication: chooseApplication)
     }
 
     /// Finder files dropped on a remote pane.
@@ -279,9 +288,10 @@ final class SFTPWindowModel {
             let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
             let item = FileItem(name: url.lastPathComponent, path: url.path, isDirectory: isDirectory, isSymlink: false, size: nil, modified: nil, mode: nil, modeString: "", owner: nil)
             do {
-                _ = try await enqueueUpload(item, hostID: hostID, into: directory, as: item.name, mayReplace: true)
+                let queued = try await enqueueUpload(item, hostID: hostID, into: directory, as: item.name, mayReplace: true)
+                if !queued.skipped.isEmpty { status = Self.leftOutSentence(queued.skipped, of: item.name) }
             } catch {
-                status = error.localizedDescription
+                status = "Could not upload “\(FileNaming.displayed(item.name))”: \(PaneModel.describe(error))"
             }
         }
     }
@@ -329,18 +339,80 @@ final class SFTPWindowModel {
         }
     }
 
+    /// Removes what a settled Cut moved, where it is still unchanged (see `CutSource.remove`).
     private func removeSource(of cut: PendingCut) async {
-        let backend: any FileSystemBackend = switch cut.side {
-        case .local: LocalBackend()
-        case .remote(let hostID): RemoteBackend(hostID: hostID, connections: connections)
+        let removal: CutRemoval
+        switch cut.side {
+        case .local:
+            removal = await Self.removeLocalSource(cut.snapshot)
+        case .remote(let hostID):
+            do {
+                let client = try await connections.client(for: hostID)
+                removal = await client.removeCutSource(cut.snapshot)
+            } catch {
+                status = "Copied “\(FileNaming.displayed(cut.source.name))” to \(cut.destinationName), but could not remove the original: \(PaneModel.describe(error))"
+                return
+            }
         }
-        do {
-            try await backend.delete(cut.source)
-            status = "Moved “\(cut.source.name)” to \(cut.destinationName)."
-        } catch {
-            status = "Copied “\(cut.source.name)” to \(cut.destinationName), but could not remove the original: \(PaneModel.describe(error))"
+        status = Self.cutSummary(removal, of: cut.source, to: cut.destinationName)
+        refreshPanes(on: PaneSource(cut.side), showing: Set([SFTP.parent(cut.source.path)] + cut.snapshot.folders))
+    }
+
+    /// Removes a Cut's source on this Mac to the Trash. When a fresh walk finds the cut folder exactly as the paste
+    /// saw it, the folder goes as one item; otherwise each unchanged file goes on its own and each emptied folder is
+    /// removed, so anything new or changed stays where it is.
+    private nonisolated static func removeLocalSource(_ source: CutSource) async -> CutRemoval {
+        let manager = FileManager.default
+        if let root = source.folders.first,
+           let again = try? await FolderTransfer.plan(from: root, to: root, list: { try FolderTransfer.listLocal($0) }),
+           source.isExactly(again),
+           (try? manager.trashItem(at: URL(fileURLWithPath: root), resultingItemURL: nil)) != nil {
+            return CutRemoval(removed: source.files.count + source.folders.count)
         }
-        refreshPanes(on: PaneSource(cut.side), showing: [backend.parent(cut.source.path)])
+        return await source.remove(
+            current: { try FolderTransfer.localEntry(atPath: $0) },
+            removeFile: { try manager.trashItem(at: URL(fileURLWithPath: $0), resultingItemURL: nil) },
+            removeEmptyFolder: { path in
+                // rmdir only ever removes an empty folder.
+                guard rmdir(path) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            })
+    }
+
+    /// The item a Cut moves, as lstat sees it now on its side, for a single file or a symlink (a folder's snapshot
+    /// is its walk).
+    private func snapshot(of item: FileItem, on side: FileSide) async throws -> CutSource {
+        let entry: ListedEntry? = switch side {
+        case .local: try FolderTransfer.localEntry(atPath: item.path)
+        case .remote(let hostID): try await RemoteBackend(hostID: hostID, connections: connections).entry(at: item.path)
+        }
+        guard let entry else { throw QueueError("“\(FileNaming.displayed(item.name))” is no longer there.") }
+        return CutSource(files: [CutSource.File(path: item.path, entry: entry)], folders: [])
+    }
+
+    /// What a settled Cut did to its source.
+    private static func cutSummary(_ removal: CutRemoval, of source: FileItem, to destination: String) -> String {
+        let name = "“\(FileNaming.displayed(source.name))”"
+        if removal.isComplete { return "Moved \(name) to \(destination)." }
+        var parts = ["Copied \(name) to \(destination)."]
+        let changed = removal.changed.count
+        let folders = removal.keptFolders.count
+        if source.isDirectory, !source.isSymlink {
+            if changed > 0 {
+                let holding = folders > 0 ? ", with the folders holding them" : ""
+                parts.append("\(changed == 1 ? "1 item" : "\(changed) items") changed since the paste and \(changed == 1 ? "was" : "were") kept\(holding).")
+            } else if folders > 0 {
+                parts.append("\(folders == 1 ? "1 folder" : "\(folders) folders") still \(folders == 1 ? "holds" : "hold") items that weren't moved, so \(folders == 1 ? "it was" : "they were") kept.")
+            }
+        } else if changed > 0 {
+            parts.append("It changed since the paste, so the original was kept.")
+        }
+        if let first = removal.failures.first {
+            let shown = "“\(FileNaming.displayed(SFTP.baseName(first.path)))”"
+            parts.append(removal.failures.count == 1
+                ? "Could not remove \(shown): \(sentence(first.reason))"
+                : "Could not remove \(removal.failures.count) items. \(shown): \(sentence(first.reason))")
+        }
+        return parts.joined(separator: " ")
     }
 
     // CONTRACT (stream reachly-files-model implements these; stream reachly-files-ui calls them).
@@ -385,6 +457,8 @@ final class SFTPWindowModel {
     /// Pastes the clipboard into `folder` on `side` (nil: that pane's current folder), following `PastePlan`.
     func paste(into side: Side, folder: String? = nil) async {
         guard let clipboard, !isPasting else { return }
+        // The files behind it as they are now: a Copy or Cut made while this paste waits must not change what it moves.
+        let files = clipboardFiles
         isPasting = true
         defer { isPasting = false }
         let cutRowsBefore = cutRows
@@ -404,6 +478,7 @@ final class SFTPWindowModel {
         var queued: [String] = []
         var skipped: [(name: String, reason: String)] = []
         var failed: [(name: String, reason: String)] = []
+        var leftOut: [String] = []
         var changedFolders: Set<String> = [directory]
         let steps = PastePlan.steps(for: clipboard, to: backend.source.fileSide, directory: directory, existingNames: existingNames)
         let copies = steps.filter { if case .copy = $0 { true } else { false } }
@@ -428,14 +503,19 @@ final class SFTPWindowModel {
                     failed.append((SFTP.baseName(from), PaneModel.describe(error)))
                 }
             case .transfer(let item, let into, let name, let deleteSourceWhenDone):
-                let file = clipboardFiles[item.path] ?? FileItem(item)
+                let file = files[item.path] ?? FileItem(item)
                 do {
+                    // A Cut removes only what it moved, as it is now: a file, or a symlink itself (never what it
+                    // leads to), is looked at before its transfer starts; a folder's walk is taken as it is queued.
+                    let isFolder = file.isDirectory && !file.isSymlink
+                    let single = deleteSourceWhenDone && !isFolder ? try await snapshot(of: file, on: clipboard.side) : nil
                     // Paste never replaces: a file that appeared since the listing fails its transfer instead.
-                    let transfers = try await enqueue(file, from: clipboard.side, to: backend.source.fileSide, into: into, as: name, mayReplace: false)
+                    let result = try await enqueue(file, from: clipboard.side, to: backend.source.fileSide, into: into, as: name, mayReplace: false)
                     queued.append(name)
                     changedFolders.insert(into)
-                    if deleteSourceWhenDone {
-                        pendingCuts[UUID()] = PendingCut(source: file, side: clipboard.side, destinationName: destinationName, transfers: transfers)
+                    if !result.skipped.isEmpty { leftOut.append(Self.leftOutSentence(result.skipped, of: file.name)) }
+                    if deleteSourceWhenDone, let snapshot = single ?? result.plan.map(CutSource.init) {
+                        pendingCuts[UUID()] = PendingCut(source: file, side: clipboard.side, destinationName: destinationName, transfers: result.transfers, snapshot: snapshot)
                     }
                 } catch {
                     failed.append((item.name, PaneModel.describe(error)))
@@ -453,9 +533,9 @@ final class SFTPWindowModel {
             self.clipboard = nil
             clipboardFiles = [:]
         }
-        status = Self.pasteSummary(
+        status = ([Self.pasteSummary(
             operation: clipboard.operation, pasted: pasted.map(SFTP.baseName), queued: queued,
-            skipped: skipped, failed: failed, destinationName: destinationName)
+            skipped: skipped, failed: failed, destinationName: destinationName)] + leftOut).joined(separator: " ")
         guard didSomething else { return }
         for shown in [left, right] where shown.source == backend.source && changedFolders.contains(shown.path) {
             await shown.refresh()
@@ -487,6 +567,12 @@ final class SFTPWindowModel {
                 : "Skipped \(skipped.count) items: \(sentence(first.reason))")
         }
         return parts.isEmpty ? "Nothing to paste." : parts.joined(separator: " ")
+    }
+
+    /// Says what a folder transfer of `name` left out (see `FolderTransfer.skipped`).
+    private static func leftOutSentence(_ skipped: [String], of name: String) -> String {
+        let what = skipped.count == 1 ? "“\(FileNaming.displayed(SFTP.baseName(skipped[0])))”" : "\(skipped.count) items"
+        return "Left out \(what) in “\(FileNaming.displayed(name))”: links to folders and special files aren't copied."
     }
 
     /// “name” for one item, “3 items” for more.

@@ -62,6 +62,11 @@ public enum PastePlan {
             let source = normalized(item.path)
             let name = item.name.isEmpty ? lastComponent(source) : item.name
             guard sameSide else {
+                // A host can list a name no path can stand for ("../x", "a/b"); landing it would write elsewhere.
+                if let reason = unusableNameReason(name) {
+                    steps.append(.skip(path: source, reason: reason))
+                    continue
+                }
                 let landing = FileNaming.uniqueName(name, isDirectory: item.isDirectory, existing: taken)
                 taken.insert(landing)
                 steps.append(.transfer(item: item, directory: destination, name: landing, deleteSourceWhenDone: clipboard.operation == .cut))
@@ -69,6 +74,10 @@ public enum PastePlan {
             }
             if item.isDirectory, isSameOrInside(destination, folder: source) {
                 steps.append(.skip(path: source, reason: insideItselfReason))
+                continue
+            }
+            if let reason = unusableNameReason(name) {
+                steps.append(.skip(path: source, reason: reason))
                 continue
             }
             let inOwnFolder = parent(of: source) == destination
@@ -99,6 +108,11 @@ public enum PastePlan {
 
     static let insideItselfReason = "Can't put a folder inside itself"
     static let alreadyHereReason = "Already in this folder"
+
+    /// The skip reason for an item whose name can't stand for one item in a folder, naming it, or nil.
+    static func unusableNameReason(_ name: String) -> String? {
+        FileNaming.pathComponentError(for: name).map { "Its name, “\(FileNaming.displayed(name))”, can't be used. \($0)" }
+    }
 
     // MARK: POSIX paths
 

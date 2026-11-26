@@ -42,9 +42,17 @@ final class OpenWithManager {
     /// Downloads the file and opens it, with the default app or one the user picks.
     func open(hostID: UUID, remotePath: String, chooseApplication: Bool) async {
         let hostName = connections.hostName(hostID)
-        let localURL = scratchDirectory
-            .appending(path: hostID.uuidString)
-            .appending(path: remotePath.trimmingCharacters(in: CharacterSet(charactersIn: "/")))
+        // The copy mirrors the remote path inside this host's scratch folder, and never lands outside it.
+        let hostFolder = scratchDirectory.appending(path: hostID.uuidString).path
+        let localURL: URL
+        do {
+            let localPath = try TransferPath.checked(hostFolder + "/" + remotePath, root: hostFolder)
+            guard try localPath != TransferPath.checked(hostFolder, root: hostFolder) else { throw TransferPathError.outside(remotePath, root: hostFolder) }
+            localURL = URL(fileURLWithPath: localPath)
+        } catch {
+            message = "Could not open \(remotePath): \(error.localizedDescription)"
+            return
+        }
         do {
             let client = try await connections.client(for: hostID)
             try FileManager.default.createDirectory(at: localURL.deletingLastPathComponent(), withIntermediateDirectories: true)

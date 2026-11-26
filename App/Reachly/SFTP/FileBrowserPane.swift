@@ -166,7 +166,7 @@ struct FileBrowserPane: View {
             if item.isDirectory {
                 Task { await pane.open(item) }
             } else if case .remote(let hostID) = pane.source {
-                Task { await model.openWith.open(hostID: hostID, remotePath: item.path, chooseApplication: false) }
+                Task { await model.openRemoteFile(item, hostID: hostID, chooseApplication: false) }
             } else {
                 NSWorkspace.shared.open(URL(fileURLWithPath: item.path))
             }
@@ -215,8 +215,8 @@ struct FileBrowserPane: View {
                 if item.isDirectory {
                     Button("Open") { Task { await pane.open(item) } }
                 } else if case .remote(let hostID) = pane.source {
-                    Button("Open") { Task { await model.openWith.open(hostID: hostID, remotePath: item.path, chooseApplication: false) } }
-                    Button("Open With…") { Task { await model.openWith.open(hostID: hostID, remotePath: item.path, chooseApplication: true) } }
+                    Button("Open") { Task { await model.openRemoteFile(item, hostID: hostID, chooseApplication: false) } }
+                    Button("Open With…") { Task { await model.openRemoteFile(item, hostID: hostID, chooseApplication: true) } }
                 } else {
                     Button("Open") { NSWorkspace.shared.open(URL(fileURLWithPath: item.path)) }
                 }
