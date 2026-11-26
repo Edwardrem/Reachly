@@ -17,13 +17,27 @@ encrypted `.reachly` file. The full plan is in
 [![CI](https://github.com/Edwardrem/Reachly/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Edwardrem/Reachly/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/Edwardrem/Reachly)](https://github.com/Edwardrem/Reachly/releases/latest)
 
-- **Tests:** 814 automated tests in 104 suites (Swift Testing) run in GitHub Actions on every push to
-  `main` and every pull request. Live tests against a real `sshd`, started on the runner, run after them. Run them
-  yourself with `swift test`; the live ones are described under [Testing](#testing).
-- **Releases:** each `vX.Y.Z` tag is built, packaged and published by
-  [`release.yml`](.github/workflows/release.yml), with a DMG, the updater ZIP and `SHA256SUMS`.
-- **Security:** what the AI may do, how prompt injection is handled and tested, and what is not done yet, are in
-  [docs/SECURITY.md](docs/SECURITY.md).
+- **Tests:** 823 automated tests in 105 suites (Swift Testing).
+  - GitHub Actions runs them on every push to `main` and every pull request, and writes the count to each run's
+    summary page.
+  - A plain `swift test` skips the 65 that need a live `sshd` or the login keychain. CI runs the live SSH tests
+    in a second step against a throwaway `sshd`; [Testing](#testing) shows how to run them yourself.
+- **Releases:** [`release.yml`](.github/workflows/release.yml) tests, builds, packages and publishes each
+  `vX.Y.Z` tag.
+  - Nothing is published unless every test passes on that commit, the live SSH tests included.
+  - From 1.1.3, each release carries `Reachly-X.Y.Z-tests.txt`: the result, the commit, the workflow run and every
+    test by name.
+  - Each release also has the DMG, the updater ZIP and `SHA256SUMS`.
+- **Homebrew:** the cask's source is [`Casks/reachly.rb`](Casks/reachly.rb), in this repository. The release
+  workflow fills in the version and checksum and pushes it to
+  [Edwardrem/homebrew-reachly](https://github.com/Edwardrem/homebrew-reachly).
+- **Security:** [docs/SECURITY.md](docs/SECURITY.md) covers:
+  - what the AI may do, and how the guard reads a command;
+  - the 97 guard-evasion attack cases and the prompt-injection tests;
+  - what is not done yet.
+- **Live or seeded:** the demo video's AI scenes ran live, with CAIMEx and real SSH to four Docker servers. The
+  finished conversation in the chat screenshots is seeded by a Debug-only flag that release builds don't contain.
+  See [What is live and what is seeded](docs/SECURITY.md#what-is-live-and-what-is-seeded).
 - **Updates:** the app checks for new versions and offers the download. Builds are ad-hoc signed, so updates can't
   install in place until builds are signed with an Apple Developer ID.
 
@@ -39,7 +53,9 @@ see "Known limits" for what the libraries underneath cannot do.
 ## Screenshots
 
 Every screenshot runs against a demo fleet: made-up hosts, keys and
-conversations. Your real hosts never leave your Mac.
+conversations. Your real hosts never leave your Mac. The finished AI
+conversations in these screenshots are seeded by the Debug-only
+`--qa-agent-demo` flag; the demo video shows the assistant working live.
 
 ![Reachly connected to a demo host, with hosts grouped into Lab, Production and Staging in the sidebar, plus tabs, splits and a true-colour terminal.](site/screenshots/fleet-terminal.png)
 
@@ -302,6 +318,12 @@ conversations. Your real hosts never leave your Mac.
   instead. Revisit before App Store distribution.
 - Builds are ad-hoc signed, not signed with a Developer ID: updates download
   rather than install in place, and macOS asks you to confirm the first launch.
+  The release workflow already signs, notarizes and turns on the hardened
+  runtime when a Developer ID certificate is added as a repository secret.
+- macOS only: there is no Windows or Linux client yet.
+- The command guard is pattern-based. It is tested against evasion, but
+  patterns can't foresee every shell trick, so keep production hosts on *ask*
+  or *read-only* (see [docs/SECURITY.md](docs/SECURITY.md#how-the-guard-reads-a-command)).
 
 ## Building
 
@@ -381,7 +403,8 @@ The unit tests cover the key formats, the `.reachly` format and import plan
 (including port-forwarding rules, themes, serial profiles, jump hosts and
 proxies), the SOCKS5 and HTTP CONNECT codecs, the SFTP packet codecs, the
 AWS Signature V4 signer and the EC2 / DigitalOcean / Azure response parsers,
-the theme importers, the command guard, the MCP server, the AI provider
+the theme importers, the command guard (including 97 guard-evasion attacks
+and an adversarial prompt-injection suite), the MCP server, the AI provider
 detection (CLI output, MCP config merge, the rows and prompts) and the ACP
 client, against `fake-acp-agent`, a scripted agent the tests start as a
 process (streamed text, reasoning, tool calls, permission requests, errors,
