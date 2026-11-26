@@ -397,7 +397,7 @@ final class FakeACPRun {
     let agent: ACPAgent
     var events: [ExternalAgentEvent] = []
 
-    init(_ scenario: String, cancelGrace: Duration = .seconds(5), initializeTimeout: Duration = .seconds(10), store: Bool = false, directory: URL? = nil) {
+    init(_ scenario: String, cancelGrace: Duration = .seconds(5), initializeTimeout: Duration = .seconds(10), store: Bool = false, directory: URL? = nil, environment: [String: String] = [:]) {
         let directory = directory ?? FileManager.default.temporaryDirectory.appending(path: "reachly-acp-\(UUID().uuidString)", directoryHint: .isDirectory)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         self.directory = directory
@@ -406,7 +406,7 @@ final class FakeACPRun {
             name: "Qoder",
             executable: FakeACPAgentTool.path,
             argumentSets: [["--acp"], ["acp"]],
-            environment: ["FAKE_ACP_SCENARIO": scenario, "FAKE_ACP_LOG": logURL.path],
+            environment: environment.merging(["FAKE_ACP_SCENARIO": scenario, "FAKE_ACP_LOG": logURL.path]) { _, fixed in fixed },
             workingDirectory: directory.appending(path: "Workspace", directoryHint: .isDirectory),
             mcpServers: { key in
                 [ACPProtocol.StdioMCPServer(name: "reachly", command: "/Applications/Reachly.app/Contents/MacOS/reachly-mcp", environment: [("REACHLY_MCP_CLIENT", "qoder"), ("REACHLY_MCP_CONVERSATION", key)])]
@@ -430,11 +430,16 @@ final class FakeACPRun {
 
     /// Every line the fake agent read, as JSON, and the argument lines.
     var received: [JSONValue] {
-        lines.filter { !$0.hasPrefix("ARGV") }.compactMap { try? JSONValue.parse(Data($0.utf8)) }
+        lines.filter { !$0.hasPrefix("ARGV") && !$0.hasPrefix("HTTP ") }.compactMap { try? JSONValue.parse(Data($0.utf8)) }
     }
 
     var launches: [String] {
         lines.filter { $0.hasPrefix("ARGV") }
+    }
+
+    /// The answers the fake agent got from the test's MCP server.
+    var httpAnswers: [String] {
+        lines.filter { $0.hasPrefix("HTTP ") }.map { String($0.dropFirst(5)) }
     }
 
     private var lines: [String] {
@@ -730,6 +735,60 @@ struct ACPAgentProcessTests {
         #expect(stop == .cancelled)
         let answer = run.received.first { $0["id"]?.stringValue == "perm-1" }
         #expect(answer?["result"]?["outcome"]?["outcome"]?.stringValue == "cancelled", "a stopped turn never allows")
+    }
+
+    @Test func everyEndOfATurnIsReportedAndStopReportsItAtOnce() async throws {
+        let answered = FakeACPRun("basic")
+        defer { answered.finish() }
+        var ended: [String] = []
+        answered.agent.turnEndHandler = { ended.append($0) }
+        _ = try await answered.run(answered.turn(key: "A"))
+        #expect(ended == ["A"])
+
+        let crashed = FakeACPRun("crash")
+        defer { crashed.finish() }
+        var crashEnds: [String] = []
+        crashed.agent.turnEndHandler = { crashEnds.append($0) }
+        _ = try? await crashed.run(crashed.turn(key: "B"))
+        #expect(crashEnds == ["B"])
+
+        // An agent that ignores Stop still has its turn reported as over when Stop is pressed.
+        let stopped = FakeACPRun("ignore-cancel", cancelGrace: .seconds(10))
+        defer { stopped.finish() }
+        var stopEnds: [String] = []
+        stopped.agent.turnEndHandler = { stopEnds.append($0) }
+        let task = Task { try await stopped.run(stopped.turn(key: "C")) }
+        await waitFor { stopped.texts.count >= 2 }
+        #expect(stopped.agent.isAnswering("C"))
+        #expect(!stopped.agent.isAnswering("D"))
+        task.cancel()
+        await waitFor { !stopEnds.isEmpty }
+        #expect(stopEnds == ["C"])
+        #expect(stopped.agent.isBusy, "the agent has not answered yet")
+        #expect(!stopped.agent.isAnswering("C"), "but nothing it asks for now can be answered")
+        stopped.agent.shutdown()
+        _ = try? await task.value
+    }
+
+    @Test func aPermissionSheetGoesWhenTheAgentAnswersWithoutWaitingOrDies() async throws {
+        for scenario in ["permission-answered", "permission-crash"] {
+            let run = FakeACPRun(scenario)
+            defer { run.finish() }
+            var asked = false
+            var sawCancel = false
+            run.agent.permissionHandler = { _ in
+                asked = true
+                // The sheet stays up until the user answers it, or its task is cancelled.
+                do { try await Task.sleep(for: .seconds(30)) } catch { sawCancel = true }
+                return .cancelled
+            }
+            let started = ContinuousClock.now
+            _ = try? await run.run()
+            await waitFor { sawCancel }
+            #expect(asked, "\(scenario)")
+            #expect(sawCancel, "\(scenario): the sheet is taken down when the turn ends")
+            #expect(ContinuousClock.now - started < .seconds(10))
+        }
     }
 
     @Test func aSecondTurnWhileOneRunsIsRefused() async throws {

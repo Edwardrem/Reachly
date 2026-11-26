@@ -115,3 +115,34 @@ final class FakeToolHost: AgentToolHost {
         auditRecords.append(record)
     }
 }
+
+/// Approval sheets as the app keeps them: each waits until it is answered, withdrawn, or its task is cancelled
+/// (which denies it, as `AppAgentHost` does).
+@MainActor
+final class WaitingApprovals {
+    private(set) var waiting: [(request: AgentApprovalRequest, continuation: CheckedContinuation<AgentApprovalResponse, Never>)] = []
+    private(set) var answers: [AgentApprovalResponse] = []
+
+    func ask(_ request: AgentApprovalRequest) async -> AgentApprovalResponse {
+        let id = request.id
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in waiting.append((request, continuation)) }
+        } onCancel: {
+            Task { @MainActor in self.answer(id, .denied) }
+        }
+    }
+
+    func answer(_ id: UUID, _ response: AgentApprovalResponse) {
+        guard let index = waiting.firstIndex(where: { $0.request.id == id }) else { return }
+        let continuation = waiting.remove(at: index).continuation
+        answers.append(response)
+        continuation.resume(returning: response)
+    }
+
+    /// What `AppAgentHost.withdrawApprovals` does.
+    func withdraw(from requester: String, conversationKey: String) {
+        for entry in waiting where entry.request.isFrom(requester, conversationKey: conversationKey) {
+            answer(entry.request.id, .withdrawn("the reply ended"))
+        }
+    }
+}

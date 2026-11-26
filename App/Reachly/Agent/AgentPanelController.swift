@@ -97,6 +97,7 @@ final class AgentPanelController {
         self.context = context
         self.workspace = workspace
         self.settings = settings
+        toolHost.externalAgentIsAnswering = { [weak self] request in self?.externalAgentIsAnswering(request) ?? false }
     }
 
     // MARK: Scope
@@ -466,8 +467,23 @@ final class AgentPanelController {
         stopExternalAgent()
         let agent = ACPAgent(configuration: Self.externalAgentConfiguration(name: name, command: command, bridgePath: mcpServer.bridgePath))
         agent.permissionHandler = { [toolHost] request in await toolHost.askPermission(request) }
+        // A command Qoder asked for through the MCP server is not left in its sheet once the turn is over.
+        agent.turnEndHandler = { [toolHost] key in
+            guard let requester = Self.externalAgentRequester else { return }
+            toolHost.withdrawApprovals(from: requester, conversationKey: key)
+        }
         externalAgent = agent
         return agent
+    }
+
+    /// What Qoder's bridge says it is (`REACHLY_MCP_CLIENT`), and the name the MCP server gives it in the sheet.
+    nonisolated static let externalAgentClient = "qoder"
+    nonisolated static var externalAgentRequester: String? { MCPServer.knownClients[externalAgentClient] }
+
+    /// Whether the panel's agent is answering the turn this request came from (see `AppAgentHost`).
+    private func externalAgentIsAnswering(_ request: AgentApprovalRequest) -> Bool {
+        guard let externalAgent, request.requester == Self.externalAgentRequester else { return false }
+        return externalAgent.isAnswering(request.conversationID?.uuidString)
     }
 
     /// How Qoder is run: the CLI in ACP mode (`--acp`, then `acp`), in Reachly's own folder, with the app's
@@ -490,7 +506,7 @@ final class AgentPanelController {
                     command: bridgePath,
                     environment: [
                         ("REACHLY_DATA_DIR", dataDirectory),
-                        ("REACHLY_MCP_CLIENT", "qoder"),
+                        ("REACHLY_MCP_CLIENT", externalAgentClient),
                         ("REACHLY_MCP_CONVERSATION", conversation),
                     ])]
             },

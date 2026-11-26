@@ -23,6 +23,8 @@ public final class AgentToolRunner {
         case denied(String)
         case blocked(String)
         case cancelled
+        /// The approval was taken down because the turn that asked ended; nothing ran.
+        case withdrawn(String)
         case localFile(String)
         case document(String)
         /// An edit arrived for a tool whose sheet line is a stand-in; nothing ran.
@@ -36,6 +38,7 @@ public final class AgentToolRunner {
             case .denied(let reason): "The user denied this action. \(reason)".trimmingCharacters(in: .whitespaces)
             case .blocked(let reason): "Not allowed: \(reason)"
             case .cancelled: "The action was cancelled."
+            case .withdrawn(let reason): "Not run: \(reason)"
             case .localFile(let detail): detail
             case .document(let detail): detail
             case .editNotApplicable(let tool): "The user's edit can't be applied to \(tool); nothing ran."
@@ -280,7 +283,7 @@ public final class AgentToolRunner {
         case .ask(let why):
             let request = AgentApprovalRequest(
                 source: source, host: target, tool: tool.rawValue, command: command, reason: reason, detail: why,
-                isDestructive: CommandGuard.destructiveMatch(command) != nil, requester: requester)
+                isDestructive: CommandGuard.destructiveMatch(command) != nil, requester: requester, conversationID: conversationID)
             let response = await host.approve(request)
             if Task.isCancelled {
                 recordNotRun(tool: tool, on: target, command: command, reason: reason, decision: .cancelled, detail: why)
@@ -317,6 +320,9 @@ public final class AgentToolRunner {
             case .denied:
                 recordNotRun(tool: tool, on: target, command: command, reason: reason, decision: .denied, detail: why)
                 throw Failure.denied("Do not retry it unchanged; ask the user how to proceed if it is needed.")
+            case .withdrawn(let why):
+                recordNotRun(tool: tool, on: target, command: command, reason: reason, decision: .cancelled, detail: why)
+                throw Failure.withdrawn(why)
             }
         }
     }

@@ -69,6 +69,11 @@ public final class ACPAgent: ExternalAgent {
 
     /// Asks the user before one of the agent's own tools runs. With none, every request is rejected.
     public var permissionHandler: (@MainActor (AgentPermissionRequest) async -> AgentPermissionDecision)?
+    /// Called with the conversation's key when a turn ends for any reason: answered, stopped, failed, or the
+    /// agent gone. Stop calls it at once, without waiting for the agent to wind down. Whatever still waits on
+    /// the turn elsewhere, such as an approval sheet for a server command the agent asked for through Reachly's
+    /// MCP server, can then be taken down: nobody is left to use its answer.
+    public var turnEndHandler: (@MainActor (_ conversationKey: String) -> Void)?
 
     /// What the agent said about itself, while it runs.
     public private(set) var agentInfo: ACPProtocol.AgentInfo?
@@ -78,6 +83,13 @@ public final class ACPAgent: ExternalAgent {
     public var isConnected: Bool { connection?.isOpen == true && agentInfo != nil }
     /// A turn is in progress.
     public var isBusy: Bool { turn != nil }
+
+    /// A turn for this conversation (for any, with nil) is in progress and was not stopped: only then can a
+    /// request the agent makes for it (a server command through the MCP server) still be answered.
+    public func isAnswering(_ conversationKey: String?) -> Bool {
+        guard let turn, !turn.cancelled else { return false }
+        return conversationKey.map { $0 == turn.conversationKey } ?? true
+    }
 
     /// Makes the transport for one launch; tests can hand in their own.
     var makeTransport: (Configuration, [String]) throws -> any ACPTransport = { configuration, arguments in
@@ -95,6 +107,7 @@ public final class ACPAgent: ExternalAgent {
     private struct TurnState {
         let id = UUID()
         let sessionID: String
+        let conversationKey: String
         let events: @MainActor (ExternalAgentEvent) -> Void
         var toolCalls: [String: AgentToolActivity] = [:]
         var permissionTasks: [UUID: Task<AgentPermissionDecision, Never>] = [:]
@@ -111,6 +124,8 @@ public final class ACPAgent: ExternalAgent {
         guard self.turn == nil else {
             throw ExternalAgentFailure(kind: .setup, message: "\(name) is still answering another message.")
         }
+        // However the turn ends, nothing may keep waiting on it.
+        defer { turnEndHandler?(turn.conversationKey) }
         let connection = try await connect()
         events(.started(agent: agentInfo?.label))
         try Task.checkCancellation()
@@ -122,10 +137,10 @@ public final class ACPAgent: ExternalAgent {
         let info = agentInfo ?? ACPProtocol.AgentInfo()
         let content = ACPProtocol.promptContent(for: turn.message, context: isNew ? turn.context : nil, agent: info)
 
-        let state = TurnState(sessionID: sessionID, events: events)
+        let state = TurnState(sessionID: sessionID, conversationKey: turn.conversationKey, events: events)
         let turnID = state.id
         self.turn = state
-        defer { if self.turn?.id == turnID { self.turn = nil } }
+        defer { endTurn(turnID) }
         do {
             let result = try await withTaskCancellationHandler {
                 try await connection.request("session/prompt", params: ACPProtocol.promptParams(sessionID: sessionID, content: content))
@@ -272,12 +287,21 @@ public final class ACPAgent: ExternalAgent {
         connection?.notify("session/cancel", params: ACPProtocol.cancelParams(sessionID: state.sessionID))
         for task in state.permissionTasks.values { task.cancel() }
         markUnfinishedCalls(.cancelled)
+        turnEndHandler?(state.conversationKey)
         let grace = configuration.cancelGrace
         Task { [weak self] in
             try? await Task.sleep(for: grace)
             guard let self, self.turn?.id == turnID else { return }
             self.shutdown()
         }
+    }
+
+    /// The turn is over: a permission request still waiting (the agent answered the prompt without waiting for
+    /// it, or went away) is answered as cancelled, so its sheet goes.
+    private func endTurn(_ turnID: UUID) {
+        guard let state = turn, state.id == turnID else { return }
+        turn = nil
+        for task in state.permissionTasks.values { task.cancel() }
     }
 
     private func markUnfinishedCalls(_ status: AgentToolActivity.Status) {

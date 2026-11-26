@@ -1,7 +1,8 @@
 // fake-acp-agent: a scripted Agent Client Protocol agent for Reachly's tests. It speaks JSON-RPC over stdio,
 // one message per line, and replays the session named by FAKE_ACP_SCENARIO. Every line it reads is appended to
 // the file named by FAKE_ACP_LOG (after a first line with its arguments), so a test can check what the client
-// sent. It never touches the network or the user's files.
+// sent. It never touches the user's files, and the network only to call the test's own MCP server on 127.0.0.1
+// (FAKE_ACP_MCP_PORT and FAKE_ACP_MCP_TOKEN), the way a real agent calls Reachly's through the bridge.
 import Foundation
 
 /// Lines read from stdin by a reader thread, for the script on the main thread. Every access to `lines` and
@@ -72,6 +73,8 @@ enum FakeACPAgent {
 
     static func serve() {
         var sessionCount = 0
+        /// Each session's conversation, from the bridge's environment in `mcpServers`.
+        var conversations: [String: String] = [:]
         while let message = inbox.next(timeout: 600) {
             guard let method = message["method"] as? String else { continue }
             let id = message["id"]
@@ -93,6 +96,9 @@ enum FakeACPAgent {
                     continue
                 }
                 sessionCount += 1
+                let servers = params["mcpServers"] as? [[String: Any]] ?? []
+                let env = servers.first?["env"] as? [[String: Any]] ?? []
+                conversations["sess-\(sessionCount)"] = env.first { $0["name"] as? String == "REACHLY_MCP_CONVERSATION" }?["value"] as? String
                 respond(id, result: ["sessionId": "sess-\(sessionCount)"])
             case "session/load":
                 guard let id else { continue }
@@ -102,7 +108,8 @@ enum FakeACPAgent {
                 respond(id, result: [:])
             case "session/prompt":
                 guard let id else { continue }
-                runPrompt(id: id, session: params["sessionId"] as? String ?? "")
+                let session = params["sessionId"] as? String ?? ""
+                runPrompt(id: id, session: session, conversation: conversations[session])
             default:
                 if let id { respond(id, errorCode: -32601, message: "Method not found: \(method)") }
             }
@@ -111,7 +118,7 @@ enum FakeACPAgent {
 
     // MARK: Scripts
 
-    static func runPrompt(id: Any, session: String) {
+    static func runPrompt(id: Any, session: String, conversation: String?) {
         switch scenario {
         case "basic", "needs-subcommand", "loadable":
             update(session, ["sessionUpdate": "agent_thought_chunk", "content": ["type": "text", "text": "Looking at the disk."]])
@@ -162,6 +169,39 @@ enum FakeACPAgent {
             FileHandle.standardError.write(Data("loading\npanic: index out of range\ntoken=abcdefghijklmnopqrstuvwxyz0123456789ABCDEF\n".utf8))
             Thread.sleep(forTimeInterval: 0.1)
             exit(3)
+        case "permission-answered", "permission-crash":
+            // Asks, then does not wait for the answer: it answers the prompt, or dies.
+            send(["jsonrpc": "2.0", "id": "perm-2", "method": "session/request_permission", "params": [
+                "sessionId": session,
+                "toolCall": ["toolCallId": "call-q", "title": "Write notes.txt", "kind": "edit"],
+                "options": [["optionId": "allow", "name": "Allow once", "kind": "allow_once"], ["optionId": "reject", "name": "Reject", "kind": "reject_once"]],
+            ] as [String: Any]])
+            Thread.sleep(forTimeInterval: 0.3)
+            if scenario == "permission-crash" { exit(3) }
+            respond(id, result: ["stopReason": "end_turn"])
+        case "mcp-call", "mcp-crash":
+            // Calls Reachly's run_command over MCP, as Qoder does through the bridge, and waits for its answer.
+            update(session, ["sessionUpdate": "tool_call", "toolCallId": "call-m", "title": "reachly: run_command", "kind": "execute", "status": "in_progress"])
+            postToolCall(conversation: conversation)
+            if scenario == "mcp-crash" {
+                // Dies once the test has seen the approval sheet, which it says by creating FAKE_ACP_TRIGGER.
+                let trigger = environment["FAKE_ACP_TRIGGER"] ?? ""
+                while !FileManager.default.fileExists(atPath: trigger) { Thread.sleep(forTimeInterval: 0.02) }
+                exit(3)
+            }
+            var answered = false
+            while let message = inbox.next() {
+                switch message["method"] as? String {
+                case "session/cancel":
+                    if !answered { respond(id, result: ["stopReason": "cancelled"]) }
+                    answered = true
+                case "fake/http-answered":
+                    if !answered { respond(id, result: ["stopReason": "end_turn"]) }
+                    return
+                default:
+                    continue
+                }
+            }
         case "fsprobe":
             send(["jsonrpc": "2.0", "id": "fs-1", "method": "fs/read_text_file", "params": ["sessionId": session, "path": "/etc/hosts"]])
             let (answer, _) = waitForAnswer(to: "fs-1")
@@ -176,6 +216,24 @@ enum FakeACPAgent {
         default:
             respond(id, result: ["stopReason": "end_turn"])
         }
+    }
+
+    /// Posts one `tools/call` to the test's MCP server, as the bridge would, naming the caller the way the bridge
+    /// does. Its answer is logged as `HTTP <body>` and then put in the inbox as `fake/http-answered`.
+    static func postToolCall(conversation: String?) {
+        guard let port = environment["FAKE_ACP_MCP_PORT"], let token = environment["FAKE_ACP_MCP_TOKEN"],
+              let url = URL(string: "http://127.0.0.1:\(port)/mcp") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("qoder", forHTTPHeaderField: "X-Reachly-Client")
+        if let conversation { request.setValue(conversation, forHTTPHeaderField: "X-Reachly-Conversation") }
+        request.httpBody = Data(#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_command","arguments":{"host":"web-01","command":"rm -rf /var/cache/nginx","reason":"Clear the cache"}}}"#.utf8)
+        URLSession.shared.dataTask(with: request) { data, _, error in
+            log("HTTP " + (data.map { String(decoding: $0, as: UTF8.self) } ?? "failed: \(error?.localizedDescription ?? "no answer")"))
+            inbox.put(["method": "fake/http-answered"])
+        }.resume()
     }
 
     /// Waits for the answer to a request the agent sent, noting any cancel that came meanwhile.

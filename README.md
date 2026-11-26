@@ -131,7 +131,9 @@ conversations. Your real hosts never leave your Mac.
   its plan stream into the transcript; when Qoder asks to use one of its own
   tools on this Mac, Reachly shows its options in a sheet, and closing it
   rejects. Stop sends `session/cancel`; a crash leaves a failure row with
-  Retry. Each conversation keeps its Qoder session, and a restarted Qoder
+  Retry. However a reply ends (answered, stopped, failed, Qoder gone), the
+  sheets it was waiting on go, and a command it asks for after that gets no
+  sheet. Each conversation keeps its Qoder session, and a restarted Qoder
   loads it back when it offers `session/load`.
 - **Guardrails**: each host is read-only (a safe list such as `ls`, `cat`,
   `systemctl status`), ask (every command in an approval sheet) or allowlist
@@ -145,7 +147,9 @@ conversations. Your real hosts never leave your Mac.
   HTTP on localhost with a bearer token, plus a stdio bridge inside the app
   bundle) so Claude Desktop, Claude Code or any MCP client drive your servers
   with their own subscription. Settings → AI Integration shows the one-line config for
-  each client. The guardrails and audit log apply identically.
+  each client. The guardrails and audit log apply identically. A client that
+  cancels a call (`notifications/cancelled`) or drops its connection takes the
+  call's approval sheet down, and the bridge never sends a `tools/call` twice.
 - **AI providers found on this Mac**: Settings → AI Integration lists what is
   already installed, each with one button behind a confirmation that says
   exactly what will happen. To show what is already connected, detection

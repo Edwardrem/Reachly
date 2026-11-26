@@ -103,6 +103,63 @@ struct MCPServerTests {
         }
     }
 
+    /// web-01 asks before every command; the sheets wait.
+    @MainActor
+    private func startWaitingServer() async throws -> (MCPServer, FakeToolHost, WaitingApprovals, Client) {
+        let host = FakeToolHost(hosts: [FakeToolHost.web])
+        let approvals = WaitingApprovals()
+        host.approval = { request in await approvals.ask(request) }
+        let server = MCPServer(toolHost: host, token: "secret-token", serverVersion: "test")
+        let port = try await server.start(port: 0)
+        return (server, host, approvals, Client(port: port, token: "secret-token"))
+    }
+
+    private static let waitingCall = #"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"run_command","arguments":{"host":"web-01","command":"rm -rf /srv/old","reason":"clean up"}}}"#
+
+    @Test @MainActor func aDroppedConnectionDeniesTheCallItWasWaitingOn() async throws {
+        let (server, host, approvals, client) = try await startWaitingServer()
+        defer { Task { await server.stop() } }
+        // A client that sends the call and goes away, as a bridge does when its agent is killed.
+        let socket = try RawHTTPClient(port: client.port)
+        socket.send("POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer secret-token\r\nContent-Type: application/json\r\nContent-Length: \(Self.waitingCall.utf8.count)\r\n\r\n\(Self.waitingCall)")
+        await waitFor { !approvals.waiting.isEmpty }
+        #expect(approvals.waiting.count == 1)
+        socket.close()
+        await waitFor(.seconds(5)) { approvals.waiting.isEmpty }
+        #expect(approvals.waiting.isEmpty, "the sheet goes with the connection")
+        #expect(approvals.answers == [.denied])
+        #expect(host.executed.isEmpty)
+        #expect(host.auditRecords.map(\.decision) == [.cancelled])
+    }
+
+    @Test @MainActor func notificationsCancelledStopsTheCallItNames() async throws {
+        let (server, host, approvals, client) = try await startWaitingServer()
+        defer { Task { await server.stop() } }
+        var sessionA = client
+        sessionA.extraHeaders = ["Mcp-Session-Id": "session-a"]
+        var sessionB = client
+        sessionB.extraHeaders = ["Mcp-Session-Id": "session-b"]
+        let call = Task { try await sessionA.post(Self.waitingCall) }
+        await waitFor { !approvals.waiting.isEmpty }
+        #expect(server.runningCallCount == 1)
+
+        // Another client's cancel for the same id does nothing.
+        let (otherStatus, _, _) = try await sessionB.post(#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":9}}"#)
+        #expect(otherStatus == 202)
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(approvals.waiting.count == 1)
+
+        let (status, _, _) = try await sessionA.post(#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":9,"reason":"user stopped"}}"#)
+        #expect(status == 202)
+        let (callStatus, answer, _) = try await call.value
+        #expect(callStatus == 200)
+        #expect(answer?["result"]?["isError"]?.boolValue == true)
+        #expect(approvals.answers == [.denied])
+        #expect(host.executed.isEmpty)
+        #expect(host.auditRecords.map(\.decision) == [.cancelled])
+        #expect(server.runningCallCount == 0)
+    }
+
     @Test func batchesAuthAndOrigin() async throws {
         let (server, _, client) = try await startServer()
         defer { Task { await server.stop() } }
@@ -135,5 +192,35 @@ struct MCPServerTests {
         get.setValue("Bearer secret-token", forHTTPHeaderField: "Authorization")
         let (_, response) = try await URLSession.shared.data(for: get)
         #expect((response as? HTTPURLResponse)?.statusCode == 405)
+    }
+}
+
+/// A bare TCP connection to the test server, so a test can drop it mid-request.
+final class RawHTTPClient {
+    struct ConnectFailed: Error {}
+    private let descriptor: Int32
+
+    init(port: Int) throws {
+        descriptor = socket(AF_INET, SOCK_STREAM, 0)
+        var address = sockaddr_in()
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = in_port_t(UInt16(port).bigEndian)
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let connected = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+        }
+        guard descriptor >= 0, connected == 0 else {
+            Darwin.close(descriptor)
+            throw ConnectFailed()
+        }
+    }
+
+    func send(_ text: String) {
+        let bytes = Array(text.utf8)
+        _ = bytes.withUnsafeBytes { Darwin.write(descriptor, $0.baseAddress, $0.count) }
+    }
+
+    func close() {
+        Darwin.close(descriptor)
     }
 }

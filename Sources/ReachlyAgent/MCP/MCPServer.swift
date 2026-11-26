@@ -22,6 +22,15 @@ public final class MCPServer: @unchecked Sendable {
     private var channel: Channel?
     private let lock = NSLock()
     private var sessions: Set<String> = []
+    /// The `tools/call` requests still running, by the client's `Mcp-Session-Id` and the request's id, so
+    /// `notifications/cancelled` can stop one. Guarded by `lock`.
+    private var calls: [CallKey: (token: UUID, task: Task<JSONValue, any Error>)] = [:]
+
+    struct CallKey: Hashable {
+        var session: String
+        /// The request id as JSON text, so `7` and `"7"` stay apart.
+        var id: String
+    }
 
     public private(set) var port: Int?
 
@@ -96,7 +105,10 @@ public final class MCPServer: @unchecked Sendable {
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { [self] channel in
                 channel.eventLoop.makeCompletedFuture {
-                    try channel.pipeline.syncOperations.configureHTTPServerPipeline(withErrorHandling: true)
+                    // Without NIO's pipelining helper, which stops reading while a response is pending: the
+                    // connection must keep reading to see a client go away mid-call. MCPHTTPHandler keeps the
+                    // answers in order itself.
+                    try channel.pipeline.syncOperations.configureHTTPServerPipeline(withPipeliningAssistance: false, withErrorHandling: true)
                     try channel.pipeline.syncOperations.addHandler(MCPHTTPHandler(server: self))
                 }
             }
@@ -191,11 +203,14 @@ public final class MCPServer: @unchecked Sendable {
                 continue
             }
             if rpc.isNotification {
-                await handleNotification(rpc)
+                handleNotification(rpc, session: request.headers.first(name: "Mcp-Session-Id"))
                 continue
             }
             do {
-                let result = try await dispatch(rpc, caller: Self.caller(from: request.headers))
+                let caller = Self.caller(from: request.headers)
+                let result = rpc.method == "tools/call"
+                    ? try await call(rpc, caller: caller, session: request.headers.first(name: "Mcp-Session-Id"))
+                    : try await dispatch(rpc, caller: caller)
                 if rpc.method == "initialize" {
                     let session = UUID().uuidString
                     lock.withLock { _ = sessions.insert(session) }
@@ -214,9 +229,34 @@ public final class MCPServer: @unchecked Sendable {
         return .json(isBatch ? .array(responses) : responses[0], extra: sessionHeader)
     }
 
-    private func handleNotification(_ request: JSONRPC.Request) async {
-        // notifications/initialized, notifications/cancelled: nothing to do.
+    private func handleNotification(_ request: JSONRPC.Request, session: String?) {
+        // notifications/initialized: nothing to do.
+        guard request.method == "notifications/cancelled", let session, let id = request.params?["requestId"] else { return }
+        let running = lock.withLock { calls[CallKey(session: session, id: id.text)] }
+        // A command waiting for approval is taken off the sheet as denied; one running is stopped.
+        running?.task.cancel()
     }
+
+    /// Runs a `tools/call` so it can be stopped: when the client cancels it (`notifications/cancelled`, for a
+    /// client that sends its `Mcp-Session-Id`), or when the HTTP connection it came on goes away, so a sheet
+    /// nobody can use the answer of does not stay up, and a command whose output has nowhere to go stops.
+    private func call(_ rpc: JSONRPC.Request, caller: Caller, session: String?) async throws -> JSONValue {
+        let task = Task { try await self.dispatch(rpc, caller: caller) }
+        let token = UUID()
+        let key = session.map { CallKey(session: $0, id: (rpc.id ?? .null).text) }
+        if let key { lock.withLock { calls[key] = (token, task) } }
+        defer {
+            if let key { lock.withLock { if calls[key]?.token == token { calls[key] = nil } } }
+        }
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    /// The calls running now, for tests.
+    var runningCallCount: Int { lock.withLock { calls.count } }
 
     func dispatch(_ request: JSONRPC.Request, caller: Caller = .unknown) async throws -> JSONValue {
         switch request.method {
@@ -272,6 +312,9 @@ public final class MCPServer: @unchecked Sendable {
 }
 
 /// Collects one HTTP request, hands it to the server, writes the response.
+///
+/// `@unchecked Sendable` because NIO calls a handler only on its channel's event loop, and every property here is
+/// read and written only there: in the handler methods, and from tasks only through `eventLoop.execute`.
 final class MCPHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
@@ -279,6 +322,11 @@ final class MCPHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private let server: MCPServer
     private var head: HTTPRequestHead?
     private var body = Data()
+    /// Requests from this connection still being answered. Cancelled when the connection goes away, so a tool
+    /// call waiting for approval is denied instead of waiting for a client that is gone.
+    private var inflight: [UUID: Task<Void, Never>] = [:]
+    /// The request before this one on the connection: its answer goes out first, as HTTP/1.1 requires.
+    private var previous: Task<Void, Never>?
 
     init(server: MCPServer) {
         self.server = server
@@ -302,9 +350,14 @@ final class MCPHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             let server = self.server
             self.head = nil
             body = Data()
-            Task {
+            let token = UUID()
+            let before = previous
+            let task = Task {
                 let response = await server.handle(request)
+                await before?.value
                 channel.eventLoop.execute {
+                    self.inflight[token] = nil
+                    guard channel.isActive else { return }
                     var headers = HTTPHeaders(response.headers)
                     headers.add(name: "Content-Length", value: String(response.body.count))
                     headers.add(name: "Cache-Control", value: "no-store")
@@ -322,7 +375,17 @@ final class MCPHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     }
                 }
             }
+            inflight[token] = task
+            previous = task
         }
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        let running = inflight.values
+        inflight = [:]
+        previous = nil
+        for task in running { task.cancel() }
+        context.fireChannelInactive()
     }
 
     func errorCaught(context: ChannelHandlerContext, error: Error) {

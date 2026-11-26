@@ -161,6 +161,80 @@ struct AgentSessionExternalAgentTests {
     }
 }
 
+// MARK: - Server commands a turn asked for
+
+@Suite("Server commands an ACP agent asked for", .serialized)
+@MainActor
+struct ExternalAgentApprovalTests {
+    /// Reachly's MCP server with web-01, which asks before every command, and sheets that wait.
+    private func startServer() async throws -> (MCPServer, FakeToolHost, WaitingApprovals, Int) {
+        let host = FakeToolHost(hosts: [FakeToolHost.web])
+        let approvals = WaitingApprovals()
+        host.approval = { request in await approvals.ask(request) }
+        let server = MCPServer(toolHost: host, token: "secret-token", serverVersion: "test")
+        let port = try await server.start(port: 0)
+        return (server, host, approvals, port)
+    }
+
+    @Test func stopTakesDownTheSheetForACommandTheAgentAskedFor() async throws {
+        let (server, host, approvals, port) = try await startServer()
+        defer { Task { await server.stop() } }
+        let run = FakeACPRun("mcp-call", environment: ["FAKE_ACP_MCP_PORT": "\(port)", "FAKE_ACP_MCP_TOKEN": "secret-token"])
+        defer { run.finish() }
+        run.agent.turnEndHandler = { key in approvals.withdraw(from: "Qoder", conversationKey: key) }
+        let conversation = UUID()
+        let task = Task { try await run.run(run.turn(key: conversation.uuidString)) }
+        await waitFor { !approvals.waiting.isEmpty }
+        #expect(approvals.waiting.first?.request.requester == "Qoder")
+        #expect(approvals.waiting.first?.request.conversationID == conversation)
+
+        task.cancel()
+        // Taken down at Stop, without waiting for the agent to answer the prompt.
+        await waitFor(.seconds(2)) { approvals.waiting.isEmpty }
+        #expect(approvals.waiting.isEmpty)
+        #expect(try await task.value == .cancelled)
+        if case .withdrawn = approvals.answers.first {} else { Issue.record("expected the sheet withdrawn, got \(approvals.answers)") }
+        await waitFor { !run.httpAnswers.isEmpty }
+        #expect(run.httpAnswers.first?.contains("Not run") == true, "the agent hears that nothing ran")
+        #expect(host.executed.isEmpty, "clicking Run afterwards can't run it: the sheet is gone")
+        #expect(host.auditRecords.map(\.decision) == [.cancelled])
+        #expect(host.auditRecords.first?.conversationID == conversation)
+    }
+
+    @Test func aCrashTakesDownTheSheetForACommandTheAgentAskedFor() async throws {
+        let (server, host, approvals, port) = try await startServer()
+        defer { Task { await server.stop() } }
+        let directory = FileManager.default.temporaryDirectory.appending(path: "reachly-acp-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let trigger = directory.appending(path: "crash-now")
+        let run = FakeACPRun("mcp-crash", directory: directory, environment: ["FAKE_ACP_MCP_PORT": "\(port)", "FAKE_ACP_MCP_TOKEN": "secret-token", "FAKE_ACP_TRIGGER": trigger.path])
+        defer { run.finish() }
+        run.agent.turnEndHandler = { key in approvals.withdraw(from: "Qoder", conversationKey: key) }
+        let task = Task { try await run.run(run.turn(key: UUID().uuidString)) }
+        await waitFor { !approvals.waiting.isEmpty }
+        #expect(approvals.waiting.count == 1)
+        FileManager.default.createFile(atPath: trigger.path, contents: Data())
+        await #expect(throws: ExternalAgentFailure.self) { _ = try await task.value }
+        await waitFor(.seconds(5)) { approvals.waiting.isEmpty }
+        #expect(approvals.waiting.isEmpty)
+        #expect(host.executed.isEmpty)
+        #expect(host.auditRecords.map(\.decision) == [.cancelled])
+    }
+
+    @Test func aRequestFromTheAgentIsMatchedToItsConversation() {
+        let conversation = UUID()
+        let request = AgentApprovalRequest(source: .mcp, host: FakeToolHost.web, tool: "run_command", command: "df -h", reason: "", detail: "", isDestructive: false, requester: "Qoder", conversationID: conversation)
+        #expect(request.isFrom("Qoder", conversationKey: conversation.uuidString))
+        #expect(!request.isFrom("Qoder", conversationKey: UUID().uuidString))
+        #expect(!request.isFrom("Claude", conversationKey: conversation.uuidString))
+        var plain = request
+        plain.requester = nil
+        #expect(!plain.isFrom("Qoder", conversationKey: conversation.uuidString), "another MCP client's sheet stays")
+        var unnamed = request
+        unnamed.conversationID = nil
+        #expect(unnamed.isFrom("Qoder", conversationKey: conversation.uuidString))
+    }
+}
+
 // MARK: - MCP callers
 
 @Suite("MCP callers Reachly started")
