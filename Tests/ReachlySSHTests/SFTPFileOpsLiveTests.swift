@@ -1,4 +1,5 @@
 import Foundation
+import ReachlyCore
 import Synchronization
 import Testing
 @testable import ReachlySSH
@@ -610,6 +611,133 @@ struct SFTPFileOpsLiveTests {
                 #expect(await copy.result.error is CancellationError)
             }
             #expect(try await Self.names(root, sftp) == ["a.txt", "folder"])
+        }
+    }
+
+    // MARK: A Cut removes only what is unchanged (removeCutSource)
+
+    @Test func aCutKeepsWhatWasAddedOrChangedSinceThePasteAndRemovesTheRest() async throws {
+        try await withScratch { sftp, root in
+            try await Self.withLocalFolder { folder in
+                let source = root + "/src"
+                for path in [source, source + "/sub", source + "/empty"] { try await sftp.makeDirectory(path) }
+                try await sftp.writeFile(Data("a".utf8), to: source + "/a.txt")
+                try await sftp.writeFile(Data("b".utf8), to: source + "/b.txt")
+                try await sftp.writeFile(Data("c".utf8), to: source + "/sub/c.txt")
+
+                // What a paste of a Cut to this Mac does: walk the folder, make its folders, then transfer each file.
+                let plan = try await FolderTransfer.plan(from: source, to: folder.appending(path: "src").path, list: { try await sftp.listEntries($0) })
+                let snapshot = CutSource(plan)
+                try plan.makeLocalFolders(mayExist: false)
+                #expect(plan.files.map(\.source) == [source + "/a.txt", source + "/b.txt", source + "/sub/c.txt"])
+                for (index, file) in plan.files.enumerated() {
+                    try await sftp.download(file.source, to: URL(fileURLWithPath: file.target), overwrite: .never(SFTPClient.TargetClaim()))
+                    // While the transfers run, a new file appears in the folder being cut.
+                    if index == 0 { try await sftp.writeFile(Data("new".utf8), to: source + "/sub/new.txt") }
+                }
+                // And b.txt grows after it was sent.
+                let handle = try await sftp.openFile(source + "/b.txt", flags: [.write])
+                try await sftp.write(handle: handle, offset: 1, data: Array("more".utf8))
+                try await sftp.closeHandle(handle)
+
+                let removal = await sftp.removeCutSource(snapshot)
+                #expect(removal.changed == [source + "/b.txt"])
+                #expect(Set(removal.keptFolders) == [source, source + "/sub"])
+                #expect(removal.failures.isEmpty)
+                // The rest went: a.txt, sub/c.txt and the empty folder.
+                #expect(try await Self.names(source, sftp) == ["b.txt", "sub"])
+                #expect(try await Self.names(source + "/sub", sftp) == ["new.txt"])
+                #expect(try await sftp.readFile(source + "/b.txt") == Data("bmore".utf8))
+                #expect(try await sftp.readFile(source + "/sub/new.txt") == Data("new".utf8))
+                #expect(try Data(contentsOf: folder.appending(path: "src/a.txt")) == Data("a".utf8))
+                #expect(try Data(contentsOf: folder.appending(path: "src/sub/c.txt")) == Data("c".utf8))
+            }
+        }
+    }
+
+    @Test func aCopyThatLandedInsideTheFolderBeingCutIsKept() async throws {
+        // Both sides on one machine (localhost, or a home shared over NFS): the copy can land inside the source.
+        try await withScratch { sftp, root in
+            let source = root + "/src"
+            try await sftp.makeDirectory(source)
+            try await sftp.writeFile(Data("a".utf8), to: source + "/a.txt")
+            let plan = try await FolderTransfer.plan(from: source, to: source + "/inside/src", list: { try await sftp.listEntries($0) })
+            let snapshot = CutSource(plan)
+            try await sftp.makeDirectory(source + "/inside")
+            for folder in plan.folders { try await sftp.makeDirectory(folder.target) }
+            for file in plan.files { try await sftp.copyItem(file.source, to: file.target) }
+
+            let removal = await sftp.removeCutSource(snapshot)
+            #expect(removal.changed.isEmpty)
+            #expect(removal.keptFolders == [source])
+            #expect(try await Self.names(source, sftp) == ["inside"])
+            #expect(try await sftp.readFile(source + "/inside/src/a.txt") == Data("a".utf8))
+        }
+    }
+
+    @Test func aCutOfAFileReplacedSinceThePasteKeepsIt() async throws {
+        try await withScratch { sftp, root in
+            let path = root + "/report.txt"
+            try await sftp.writeFile(Data("first".utf8), to: path)
+            let snapshot = CutSource(files: [CutSource.File(path: path, entry: try #require(try await sftp.entry(at: path)))], folders: [])
+            try await sftp.remove(path)
+            try await sftp.writeFile(Data("second version".utf8), to: path)
+            #expect(await sftp.removeCutSource(snapshot).changed == [path])
+            #expect(try await sftp.readFile(path) == Data("second version".utf8))
+        }
+    }
+
+    // MARK: A transfer counts as done only with every byte
+
+    @Test(.enabled(if: LiveServer.current?.sharesThisMacsFiles == true))
+    func aDownloadThatComesUpShortNeverCompletes() async throws {
+        try await withScratch { sftp, root in
+            try await Self.withLocalFolder { folder in
+                let remote = root + "/shrinks.bin"
+                // The file is cut short on the host (on this Mac, for the test server) once the download knows its size.
+                for overwrite in [SFTPClient.Overwrite.allowed, .never(SFTPClient.TargetClaim())] {
+                    try await sftp.writeFile(Self.bytes(2 * 1024 * 1024, seed: 9), to: remote)
+                    let local = folder.appending(path: "shrinks-\(UUID().uuidString).bin")
+                    let error = await Self.error {
+                        try await sftp.download(remote, to: local, overwrite: overwrite) { transferred, _ in
+                            if transferred == 0 { _ = truncate(remote, 1000) }
+                        }
+                    }
+                    #expect(error?.localizedDescription.contains("changed on the host") == true, "\(String(describing: error))")
+                }
+            }
+        }
+    }
+
+    @Test func aResumeOntoALongerLocalFileStartsOver() async throws {
+        try await withScratch { sftp, root in
+            try await Self.withLocalFolder { folder in
+                let content = Self.bytes(100_000, seed: 3)
+                try await sftp.writeFile(content, to: root + "/file.bin")
+                let local = folder.appending(path: "file.bin")
+                try Self.bytes(150_000, seed: 4).write(to: local)
+                try await sftp.download(root + "/file.bin", to: local, resume: true)
+                #expect(try Data(contentsOf: local) == content)
+
+                // A resume of a download that already has every byte still reads to the end and checks the size.
+                try await sftp.download(root + "/file.bin", to: local, resume: true)
+                #expect(try Data(contentsOf: local) == content)
+            }
+        }
+    }
+
+    @Test func anUploadOfAFileThatShrinksNeverCompletes() async throws {
+        try await withScratch { sftp, root in
+            try await Self.withLocalFolder { folder in
+                let local = folder.appending(path: "shrinks.bin")
+                try Self.bytes(2 * 1024 * 1024, seed: 6).write(to: local)
+                let error = await Self.error {
+                    try await sftp.upload(local, to: root + "/shrinks.bin", overwrite: .never(SFTPClient.TargetClaim())) { transferred, _ in
+                        if transferred == 0 { _ = truncate(local.path, 1000) }
+                    }
+                }
+                #expect(error?.localizedDescription.contains("changed on this Mac") == true, "\(String(describing: error))")
+            }
         }
     }
 }

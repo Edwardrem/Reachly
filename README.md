@@ -107,7 +107,10 @@ conversations. Your real hosts never leave your Mac.
   pane until they are pasted or the pane moves on. Nothing is overwritten:
   a taken name gets a copy name or an error, a file that appears while a paste is
   queued stops that transfer, and Cut to the other side removes the
-  originals only once everything has arrived. Every delete asks first. While
+  originals only once everything has arrived in full, and only what is
+  unchanged since the paste: a file added or changed meanwhile stays, with
+  the folder holding it (on the Mac, what is removed goes to the Trash).
+  Every delete asks first. While
   the Files window is in front, its Files menu has Reload (⌘R), New File…
   (⌥⌘N), New Folder… (⇧⌘N), Duplicate (⌘D), Move to… and Delete… (⌘⌫ while
   a file list has focus); the main window's Split Right, New Snippet and New

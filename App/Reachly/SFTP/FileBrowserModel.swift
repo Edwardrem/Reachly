@@ -303,29 +303,14 @@ final class RemoteBackend: FileSystemBackend {
     func join(_ base: String, _ component: String) -> String { SFTP.join(base, component) }
     func parent(_ path: String) -> String { SFTP.parent(path) }
 
-    /// The entries of `path` as a folder transfer walks them (`FolderTransfer.plan`): what each entry is itself,
-    /// and for a symlink whether it leads to a folder.
+    /// The entries of `path` as a folder transfer walks them (`FolderTransfer.plan`).
     func listEntries(_ path: String) async throws -> [ListedEntry] {
-        let client = try await client()
-        var entries: [ListedEntry] = []
-        for entry in try await client.listDirectory(path) {
-            let attributes = entry.attributes
-            let kind: ListedEntry.Kind = switch attributes.kind {
-            case .regular: .file
-            case .directory: .folder
-            case .symlink: .symlink
-            case .other: .other
-            }
-            var leadsToFolder = false
-            // Never build a path from a name that can't stand for one item: the walk refuses it instead.
-            if kind == .symlink, FileNaming.pathComponentError(for: entry.name) == nil {
-                leadsToFolder = (try? await client.stat(SFTP.join(path, entry.name)))?.isDirectory ?? false
-            }
-            entries.append(ListedEntry(
-                name: entry.name, kind: kind, leadsToFolder: leadsToFolder,
-                size: attributes.size.map { Int64(clamping: $0) }, modified: attributes.modificationTime))
-        }
-        return entries
+        try await client().listEntries(path)
+    }
+
+    /// The item at `path` as lstat sees it, or nil when nothing is there.
+    func entry(at path: String) async throws -> ListedEntry? {
+        try await client().entry(at: path)
     }
 }
 

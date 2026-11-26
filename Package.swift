@@ -48,7 +48,7 @@ let package = Package(
         ),
         .executableTarget(name: "reachly-mcp"),
         .testTarget(name: "ReachlyCoreTests", dependencies: ["ReachlyCore"]),
-        .testTarget(name: "ReachlySSHTests", dependencies: ["ReachlySSH"]),
+        .testTarget(name: "ReachlySSHTests", dependencies: ["ReachlySSH", "ReachlyCore"]),
         .testTarget(name: "ReachlyTerminalTests", dependencies: ["ReachlyTerminal", "ReachlySSH", "ReachlyCore"]),
         .testTarget(name: "ReachlyAgentTests", dependencies: ["ReachlyAgent", "ReachlyTerminal", "ReachlySSH", "ReachlyCore"]),
     ]

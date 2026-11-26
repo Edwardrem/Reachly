@@ -627,21 +627,25 @@ public final class SFTPClient: @unchecked Sendable {
     /// Downloads `remotePath` to `localURL`, with `pipelineDepth` reads in
     /// flight. With `resume`, appends to the existing local file starting at its size.
     /// With `overwrite: .never`, the local file is created with O_CREAT|O_EXCL and a clash fails the download.
+    ///
+    /// Returns only when the bytes written equal the size the file had when the download started; otherwise it
+    /// throws, so a download that came up short (or a file that changed meanwhile) never counts as done.
     public func download(_ remotePath: String, to localURL: URL, resume: Bool = false, overwrite: Overwrite = .allowed, progress: Progress? = nil) async throws {
         let attributes = try await stat(remotePath)
         let total = attributes.size.map(Int64.init)
         let manager = FileManager.default
-        let (file, offset) = try LocalTarget.open(localURL, resume: resume, overwrite: overwrite)
+        var (file, offset) = try LocalTarget.open(localURL, resume: resume, overwrite: overwrite)
         defer { try? file.close() }
-        if resume, let total, Int64(offset) >= total {
-            progress?(total, total)
-            return
+        if let total, Int64(offset) > total {
+            // Longer than the file on the host is now, so not a part of it: start over.
+            try file.truncate(atOffset: 0)
+            offset = 0
         }
         let handle = try await openFile(remotePath, flags: [.read])
         defer { Task { try? await self.closeHandle(handle) } }
 
-        var transferred = Int64(offset)
         var nextOffset = offset
+        progress?(Int64(nextOffset), total)
         var finished = false
         while !finished {
             try Task.checkCancellation()
@@ -654,20 +658,25 @@ public final class SFTPClient: @unchecked Sendable {
                 for try await (index, bytes) in group { results[index] = bytes }
                 return results
             }
+            // Keep the chunks up to the first short one. A short read before the known end is read again from where
+            // it stopped (a server may send less than asked); an empty read is the end.
             for chunk in chunks {
                 if chunk.isEmpty {
                     finished = true
                     break
                 }
                 try file.write(contentsOf: chunk)
-                transferred += Int64(chunk.count)
                 nextOffset += UInt64(chunk.count)
-                progress?(transferred, total)
+                progress?(Int64(nextOffset), total)
                 if chunk.count < Self.chunkSize {
-                    finished = true
+                    if total.map({ Int64(nextOffset) >= $0 }) ?? true { finished = true }
                     break
                 }
             }
+        }
+        let transferred = Int64(nextOffset)
+        if let total, transferred != total {
+            throw SFTP.Error.status(.failure, "The file changed on the host while it downloaded: \(total) bytes were expected and \(transferred) arrived", path: remotePath)
         }
         if let modified = attributes.modificationTime {
             try? manager.setAttributes([.modificationDate: modified], ofItemAtPath: localURL.path)
@@ -678,10 +687,13 @@ public final class SFTPClient: @unchecked Sendable {
     /// Uploads `localURL` to `remotePath` with `pipelineDepth` writes in flight.
     /// With `resume`, continues from the remote file's current size.
     /// With `overwrite: .never`, the remote file is created with CREAT|EXCL and a clash fails the upload.
+    ///
+    /// Returns only when the bytes sent equal the size the local file had when the upload started.
     public func upload(_ localURL: URL, to remotePath: String, resume: Bool = false, mode: UInt32? = nil, overwrite: Overwrite = .allowed, progress: Progress? = nil) async throws {
-        let total = Int64((try FileManager.default.attributesOfItem(atPath: localURL.path)[.size] as? NSNumber)?.int64Value ?? 0)
         let file = try FileHandle(forReadingFrom: localURL)
         defer { try? file.close() }
+        // The size of what is open (through a symlink, the file it leads to).
+        let total = Int64(try file.seekToEnd())
         let (handle, start) = try await openUploadTarget(remotePath, resume: resume, mode: mode, total: total, overwrite: overwrite)
         var offset = start
         try file.seek(toOffset: offset)
@@ -712,6 +724,9 @@ public final class SFTPClient: @unchecked Sendable {
             throw error
         }
         try await closeHandle(handle)
+        guard transferred == total else {
+            throw SFTP.Error.status(.failure, "The file changed on this Mac while it uploaded: \(total) bytes were expected and \(transferred) were sent", path: remotePath)
+        }
         progress?(transferred, total)
     }
 
