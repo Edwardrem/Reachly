@@ -170,7 +170,7 @@ final class SFTPWindowModel {
         case (.remote(let fromHost), .remote(let toHost)):
             return try await enqueueCopy(item, from: fromHost, to: toHost, into: directory, as: name, mayReplace: mayReplace)
         case (.local, .local):
-            throw QueueError("“\(item.name)” is already on this Mac.")
+            throw QueueError("“\(FileNaming.displayed(item.name))” is already on this Mac.")
         }
     }
 
@@ -213,7 +213,9 @@ final class SFTPWindowModel {
                 try await client.makeDirectory(path)
             } catch {
                 // OpenSSH answers a plain "Failure" when the name is taken.
-                if (try? await client.lstat(path)) != nil { throw QueueError("There's already an item named “\(SFTP.baseName(path))” there.") }
+                if (try? await client.lstat(path)) != nil {
+                    throw QueueError("There's already an item named “\(FileNaming.displayed(SFTP.baseName(path)))” there.")
+                }
                 throw error
             }
         }
@@ -309,7 +311,7 @@ final class SFTPWindowModel {
                 Task { await removeSource(of: cut) }
             } else if states.contains(where: Self.stopsCut) {
                 pendingCuts[id] = nil
-                status = "Not every file of “\(cut.source.name)” arrived, so the original was kept."
+                status = "Not every file of “\(FileNaming.displayed(cut.source.name))” arrived, so the original was kept."
             }
         }
         observePendingCuts()
@@ -550,8 +552,8 @@ final class SFTPWindowModel {
         var parts: [String] = []
         if let first = failed.first {
             parts.append(failed.count == 1
-                ? "Could not paste “\(first.name)”: \(first.reason)"
-                : "Could not paste \(failed.count) items. “\(first.name)”: \(first.reason)")
+                ? "Could not paste “\(FileNaming.displayed(first.name))”: \(first.reason)"
+                : "Could not paste \(failed.count) items. “\(FileNaming.displayed(first.name))”: \(first.reason)")
         }
         if !pasted.isEmpty {
             parts.append("\(operation == .cut ? "Moved" : "Pasted") \(describe(pasted)).")
@@ -563,7 +565,7 @@ final class SFTPWindowModel {
         }
         if let first = skipped.first {
             parts.append(skipped.count == 1
-                ? "Skipped “\(first.name)”: \(sentence(first.reason))"
+                ? "Skipped “\(FileNaming.displayed(first.name))”: \(sentence(first.reason))"
                 : "Skipped \(skipped.count) items: \(sentence(first.reason))")
         }
         return parts.isEmpty ? "Nothing to paste." : parts.joined(separator: " ")
@@ -577,7 +579,7 @@ final class SFTPWindowModel {
 
     /// “name” for one item, “3 items” for more.
     private static func describe(_ names: [String]) -> String {
-        names.count == 1 ? "“\(names[0])”" : "\(names.count) items"
+        names.count == 1 ? "“\(FileNaming.displayed(names[0]))”" : "\(names.count) items"
     }
 
     private static func sentence(_ text: String) -> String {
