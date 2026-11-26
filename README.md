@@ -130,6 +130,22 @@ conversations. Your real hosts never leave your Mac.
   bundle) so Claude Desktop, Claude Code or any MCP client drive your servers
   with their own subscription. Settings → AI Integration shows the one-line config for
   each client. The guardrails and audit log apply identically.
+- **AI providers found on this Mac**: Settings → AI Integration lists what is
+  already installed, each with one button behind a confirmation that says
+  exactly what will happen; nothing is read, copied or written before the
+  click. A key stored in the Caimex CLI (`caimex auth export` runs only then,
+  and only the Caimex key is kept), LM Studio or Ollama serving on
+  `127.0.0.1` (pick a model, no key), and `ANTHROPIC_API_KEY` or
+  `OPENAI_API_KEY` in Reachly's own environment become the panel's provider.
+  Claude Code and Qoder connect to Reachly's MCP server through their own
+  `mcp add`; Claude Desktop gets a `reachly` entry in its config, with a
+  backup of the file saved next to it first and no existing entry ever
+  replaced; the Qoder app without its CLI gets the steps and the bridge path
+  to copy. Claude plan sign-ins and ChatGPT or Codex sign-ins can't be used
+  by other apps, so Reachly never reads them: chatting needs an Anthropic or
+  OpenAI API key. On the first launch where no provider works yet, a setup
+  sheet shows what was found and what can be set up (Set Up AI Integration…
+  reopens it).
 - **Serial consoles**: saved profiles for `/dev/cu.*` devices with baud rate,
   data bits, parity, stop bits, flow control, what Return sends, LF → CR LF
   conversion, local echo and a hex view (toggled in the status bar). Serial
@@ -286,7 +302,8 @@ The unit tests cover the key formats, the `.reachly` format and import plan
 (including port-forwarding rules, themes, serial profiles, jump hosts and
 proxies), the SOCKS5 and HTTP CONNECT codecs, the SFTP packet codecs, the
 AWS Signature V4 signer and the EC2 / DigitalOcean / Azure response parsers,
-the theme importers, the command guard and the MCP server. The live tests
+the theme importers, the command guard, the MCP server and the AI provider
+detection (CLI output, MCP config merge, the rows and prompts). The live tests
 open a real PTY shell, run exec commands, push a key, install the
 shell-integration hooks and check host-key handling against a throwaway sshd.
 
@@ -294,7 +311,7 @@ For manual QA against scratch data, launch the Debug build with
 `REACHLY_DATA_DIR=/some/dir REACHLY_KEYCHAIN_SERVICE=io.github.edwardrem.reachly.qa` and the
 arguments `--seed-demo --window=identities`. Debug builds also take
 `--sidebar=hosts|snippets|history|ports`,
-`--window=identities|settings|export|ssh-config-export|agent|ports|cloud-import|theme-editor|sftp|new-host`,
+`--window=identities|settings|export|ssh-config-export|agent|ports|cloud-import|theme-editor|sftp|new-host|ai-setup`,
 `--qa-new-host=<user@host:port>` (the editor, prefilled), `--qa-edit-host=<name>`,
 `--connect=<host name>`, `--qa-type=<text>`, `--qa-approval`, `--qa-agent-demo`
 (a finished Claude conversation with attachments and a generated PDF),

@@ -157,6 +157,10 @@ struct ContentView: View {
             SearchPaletteView()
                 .themedSheet()
         }
+        .sheet(isPresented: $appState.isShowingAISetup, onDismiss: AIIntegrationOnboarding.markDone) {
+            AIIntegrationSetupView(origin: .launch)
+                .themedSheet()
+        }
         .background(FullScreenToolbarSwitch(isFullScreen: $isFullScreen, hidesToolbar: palette.fromScheme))
         .toolbar {
             ToolbarItem(placement: .primaryAction) { claudeButton }
@@ -168,6 +172,7 @@ struct ContentView: View {
             openWindowsRequestedOnLaunch()
             syncForwardingRules()
             await mcp.apply()
+            if AIIntegrationOnboarding.shouldPresentOnLaunch() { appState.isShowingAISetup = true }
         }
         .onChange(of: workspace.changeCount) { _, _ in scheduleSave() }
         .onChange(of: forwardRules.count) { _, _ in syncForwardingRules() }
@@ -300,6 +305,7 @@ struct ContentView: View {
             case "agent": appState.isShowingAgentPanel = true
             case "ports": appState.sidebarMode = .ports
             case "cloud-import": appState.isShowingCloudImport = true
+            case "ai-setup": appState.isShowingAISetup = true
             case "theme-editor": openWindow(id: ThemeEditorView.windowID)
             case "fullscreen":
                 // Enter full screen once the main window exists, then dump the

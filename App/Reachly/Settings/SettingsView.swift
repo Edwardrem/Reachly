@@ -1,8 +1,18 @@
+import Observation
 import SwiftUI
 import ReachlyTerminal
 
+/// A Settings tab another window asked for, such as the setup sheet's "Open AI Integration".
+@MainActor
+@Observable
+final class SettingsRouter {
+    static let shared = SettingsRouter()
+    var requestedTab: String?
+}
+
 struct SettingsView: View {
     @State private var tab = SettingsView.initialTab
+    @State private var router = SettingsRouter.shared
 
     /// Debug builds take `--settings-tab=<name>` (general, appearance, security, known-hosts, data,
     /// ai-integration, cloud, updates) so a UI check can open Settings on one pane.
@@ -43,6 +53,14 @@ struct SettingsView: View {
                 .tag("updates")
         }
         .frame(width: 620)
+        .onAppear(perform: showRequestedTab)
+        .onChange(of: router.requestedTab) { _, _ in showRequestedTab() }
+    }
+
+    private func showRequestedTab() {
+        guard let requested = router.requestedTab else { return }
+        tab = requested
+        router.requestedTab = nil
     }
 }
 
