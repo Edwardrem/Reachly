@@ -98,6 +98,18 @@ conversations. Your real hosts never leave your Mac.
   delete, new folder, show hidden files, and Open / Open With… for remote
   files, which are uploaded again whenever the editor saves them. Transfers
   pipeline 16 requests of 32 KiB and resume from where they stopped.
+
+  The panes also offer New File…, Duplicate, Move to…, and Copy, Cut and
+  Paste (⌘C, ⌘X, ⌘V while a file list has focus) within a side or between
+  sides; Paste on a folder pastes into it. Cut items look dimmed in their
+  pane until they are pasted or the pane moves on. Nothing is overwritten:
+  a taken name gets a copy name or an error, a file that appears while a paste is
+  queued stops that transfer, and Cut to the other side removes the
+  originals only once everything has arrived. Every delete asks first. While
+  the Files window is in front, its Files menu has Reload (⌘R), New File…
+  (⌥⌘N), New Folder… (⇧⌘N), Duplicate (⌘D), Move to… and Delete… (⌘⌫ while
+  a file list has focus); the main window's Split Right, New Snippet and New
+  Group get those keys back when it is in front.
 - **Claude agent panel** (⌘⇧A): bring your own Anthropic or Caimex API key, kept
   apart in the Keychain, or point the panel at any OpenAI-compatible endpoint.
   Each provider keeps its own key: after upgrading from 0.3.8 an Anthropic key
@@ -302,7 +314,7 @@ Releases are cut by pushing a `vX.Y.Z` tag; see [docs/RELEASING.md](docs/RELEASI
 
 ```sh
 swift test                                   # unit tests, no network, no Keychain
-Scripts/test-sshd.sh start                   # throwaway sshd on 127.0.0.1:2222, no root needed
+Scripts/test-sshd.sh start                   # throwaway sshd on 127.0.0.1:2222 (and one without SFTP on :2223), no root needed
 source .build/test-sshd/env.sh && swift test --filter Live
 Scripts/test-sshd.sh stop
 REACHLY_KEYCHAIN_TESTS=1 swift test --filter SecretStore   # writes to and cleans the login keychain
@@ -316,7 +328,9 @@ AWS Signature V4 signer and the EC2 / DigitalOcean / Azure response parsers,
 the theme importers, the command guard, the MCP server and the AI provider
 detection (CLI output, MCP config merge, the rows and prompts). The live tests
 open a real PTY shell, run exec commands, push a key, install the
-shell-integration hooks and check host-key handling against a throwaway sshd.
+shell-integration hooks, check host-key handling and exercise the SFTP file
+operations against a throwaway sshd, and check that SFTP fails promptly on a
+server that doesn't offer it.
 
 For manual QA against scratch data, launch the Debug build with
 `REACHLY_DATA_DIR=/some/dir REACHLY_KEYCHAIN_SERVICE=io.github.edwardrem.reachly.qa` and the

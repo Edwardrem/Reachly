@@ -16,6 +16,8 @@ struct ReachlyApp: App {
     @State private var mcp: MCPServerController
     @State private var forwarding: PortForwardingManager
     @State private var themes: ThemeStore
+    /// Non-nil while the Files window is the key window.
+    @FocusedValue(\.filesWindow) private var filesWindow
     private let container: ModelContainer
 
     init() {
@@ -70,6 +72,8 @@ struct ReachlyApp: App {
         }
         .modelContainer(container)
         .defaultSize(width: 1200, height: 760)
+        // Commands that use one of the Files menu's keys (⌘D, ⌥⌘N, ⇧⌘N) give it up and turn off while the Files
+        // window is in front, and check again when they run, so a key never acts on the main window from there.
         .commands {
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates…") { updates.checkForUpdates() }
@@ -96,18 +100,35 @@ struct ReachlyApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("New Host…") { appState.hostEditor = .create }
                     .keyboardShortcut("n", modifiers: .command)
-                Button("New Group…") { appState.newGroup = NewGroupRequest() }
-                    .keyboardShortcut("n", modifiers: [.command, .shift])
-                Button("New Snippet…") { appState.snippetEditor = .create(folder: nil, command: nil) }
-                    .keyboardShortcut("n", modifiers: [.command, .option])
+                Button("New Group…") {
+                    guard !FilesWindow.isKey else { return }
+                    appState.newGroup = NewGroupRequest()
+                }
+                .keyboardShortcut(mainWindowShortcut("n", [.command, .shift]))
+                .disabled(filesWindow != nil)
+                Button("New Snippet…") {
+                    guard !FilesWindow.isKey else { return }
+                    appState.snippetEditor = .create(folder: nil, command: nil)
+                }
+                .keyboardShortcut(mainWindowShortcut("n", [.command, .option]))
+                .disabled(filesWindow != nil)
                 Button("New Forwarding Rule…") { appState.portForwardEditor = .create(hostID: appState.selectedHostID) }
                 Button("New Serial Console…") { appState.serialProfileEditor = .create }
                 Divider()
                 Button("New Tab…") { appState.isShowingNewTabPicker = true }
                     .keyboardShortcut("t", modifiers: .command)
-                Button("Close Pane") { workspace.closeFocusedPane() }
-                    .keyboardShortcut("w", modifiers: .command)
-                    .disabled(workspace.selectedTab == nil)
+                // SwiftUI gives ⌘W to this item rather than the standard Close, so in the Files window it closes that
+                // window instead of a terminal pane behind it. (Moving ⌘W between the two items doesn't work: once
+                // Close holds it, SwiftUI keeps it there.)
+                Button(filesWindow != nil ? "Close Window" : "Close Pane") {
+                    if FilesWindow.isKey {
+                        FilesWindow.closeIfKey()
+                    } else {
+                        workspace.closeFocusedPane()
+                    }
+                }
+                .keyboardShortcut("w", modifiers: .command)
+                .disabled(filesWindow == nil && workspace.selectedTab == nil)
                 Button("Close Tab") { if let id = workspace.selectedTabID { workspace.closeTab(id: id) } }
                     .keyboardShortcut("w", modifiers: [.command, .shift])
                     .disabled(workspace.selectedTab == nil)
@@ -116,9 +137,12 @@ struct ReachlyApp: App {
                 Button("Search Everything…") { appState.isShowingSearch = true }
                     .keyboardShortcut("k", modifiers: .command)
                 Divider()
-                Button("Split Right") { workspace.split(.horizontal) }
-                    .keyboardShortcut("d", modifiers: .command)
-                    .disabled(workspace.focusedSession == nil)
+                Button("Split Right") {
+                    guard !FilesWindow.isKey else { return }
+                    workspace.split(.horizontal)
+                }
+                .keyboardShortcut(mainWindowShortcut("d", .command))
+                .disabled(workspace.focusedSession == nil || filesWindow != nil)
                 Button("Split Down") { workspace.split(.vertical) }
                     .keyboardShortcut("d", modifiers: [.command, .shift])
                     .disabled(workspace.focusedSession == nil)
@@ -176,6 +200,8 @@ struct ReachlyApp: App {
                 Button(appState.isShowingAgentPanel ? "Hide Claude Panel" : "Show Claude Panel") { appState.isShowingAgentPanel.toggle() }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
             }
+            // After Session, so the Files menu sits next to it.
+            FilesCommands()
             CommandGroup(after: .windowArrangement) {
                 Button("Previous Tab") { workspace.selectPreviousTab() }
                     .keyboardShortcut("[", modifiers: [.command, .shift])
@@ -229,6 +255,11 @@ struct ReachlyApp: App {
                 .appAppearance(themes)
         }
         .modelContainer(container)
+    }
+
+    /// A main-window command's shortcut, or none while the Files window is in front and its menu uses the same keys.
+    private func mainWindowShortcut(_ key: KeyEquivalent, _ modifiers: EventModifiers) -> KeyboardShortcut? {
+        filesWindow == nil ? KeyboardShortcut(key, modifiers: modifiers) : nil
     }
 }
 

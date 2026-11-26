@@ -175,6 +175,8 @@ public enum SFTP {
         case protocolError(String)
         case unsupportedVersion(UInt32)
         case closed
+        /// The server refused the `sftp` subsystem.
+        case unavailable
 
         public var errorDescription: String? {
             switch self {
@@ -184,6 +186,7 @@ public enum SFTP {
             case .protocolError(let detail): return "SFTP protocol error: \(detail)"
             case .unsupportedVersion(let version): return "The server speaks SFTP version \(version); Reachly needs version 3."
             case .closed: return "The SFTP session is closed."
+            case .unavailable: return "This server doesn't offer SFTP."
             }
         }
 

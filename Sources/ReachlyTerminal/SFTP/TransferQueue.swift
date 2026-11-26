@@ -39,14 +39,26 @@ public final class TransferItem: Identifiable {
     public private(set) var finishedAt: Date?
     /// Set when the transfer may continue from where it stopped.
     public private(set) var resumable = false
+    /// False when the transfer must never replace a file at its destination (Paste): the file is created
+    /// exclusively there, and a clash fails the transfer.
+    public let mayReplace: Bool
+    /// The destination file this transfer made when it may not replace one, so a retry or resume writes to that file
+    /// again and to nothing else. (A copy between hosts claims its target; its temporary file on the Mac is its own.)
+    private let claim = SFTPClient.TargetClaim()
 
-    init(kind: Kind, hostID: UUID, hostName: String, localURL: URL, remotePath: String, total: Int64?) {
+    init(kind: Kind, hostID: UUID, hostName: String, localURL: URL, remotePath: String, total: Int64?, mayReplace: Bool) {
         self.kind = kind
         self.hostID = hostID
         self.hostName = hostName
         self.localURL = localURL
         self.remotePath = remotePath
         self.total = total
+        self.mayReplace = mayReplace
+    }
+
+    /// What the transfer may do to a file already at its destination.
+    var overwrite: SFTPClient.Overwrite {
+        mayReplace ? .allowed : .never(claim)
     }
 
     public var displayName: String {
@@ -107,21 +119,27 @@ public final class TransferQueue {
     public var activeCount: Int { items.filter { $0.state == .running }.count }
     public var pendingCount: Int { items.filter { $0.state == .queued || $0.state == .running }.count }
 
+    /// Queues a download. With `mayReplace: false` a file already at `localURL` is never replaced: the transfer
+    /// fails instead.
     @discardableResult
-    public func enqueueDownload(hostID: UUID, hostName: String, remotePath: String, to localURL: URL, size: Int64?) -> TransferItem {
-        add(TransferItem(kind: .download, hostID: hostID, hostName: hostName, localURL: localURL, remotePath: remotePath, total: size))
+    public func enqueueDownload(hostID: UUID, hostName: String, remotePath: String, to localURL: URL, size: Int64?, mayReplace: Bool = true) -> TransferItem {
+        add(TransferItem(kind: .download, hostID: hostID, hostName: hostName, localURL: localURL, remotePath: remotePath, total: size, mayReplace: mayReplace))
     }
 
+    /// Queues an upload. With `mayReplace: false` a file already at `remotePath` is never replaced: the transfer
+    /// fails instead.
     @discardableResult
-    public func enqueueUpload(hostID: UUID, hostName: String, localURL: URL, to remotePath: String) -> TransferItem {
+    public func enqueueUpload(hostID: UUID, hostName: String, localURL: URL, to remotePath: String, mayReplace: Bool = true) -> TransferItem {
         let size = (try? FileManager.default.attributesOfItem(atPath: localURL.path)[.size] as? NSNumber)?.int64Value
-        return add(TransferItem(kind: .upload, hostID: hostID, hostName: hostName, localURL: localURL, remotePath: remotePath, total: size))
+        return add(TransferItem(kind: .upload, hostID: hostID, hostName: hostName, localURL: localURL, remotePath: remotePath, total: size, mayReplace: mayReplace))
     }
 
+    /// Queues a copy between hosts through a temporary file on the Mac. With `mayReplace: false` a file already at
+    /// `targetPath` is never replaced: the transfer fails instead.
     @discardableResult
-    public func enqueueCopy(fromHostID: UUID, fromHostName: String, remotePath: String, toHostID: UUID, toHostName: String, targetPath: String, size: Int64?) -> TransferItem {
+    public func enqueueCopy(fromHostID: UUID, fromHostName: String, remotePath: String, toHostID: UUID, toHostName: String, targetPath: String, size: Int64?, mayReplace: Bool = true) -> TransferItem {
         let temporary = FileManager.default.temporaryDirectory.appending(path: "reachly-copy-\(UUID().uuidString)-\(SFTP.baseName(remotePath))")
-        return add(TransferItem(kind: .copyBetweenHosts(targetHostID: toHostID, targetHostName: toHostName, targetPath: targetPath), hostID: fromHostID, hostName: fromHostName, localURL: temporary, remotePath: remotePath, total: size))
+        return add(TransferItem(kind: .copyBetweenHosts(targetHostID: toHostID, targetHostName: toHostName, targetPath: targetPath), hostID: fromHostID, hostName: fromHostName, localURL: temporary, remotePath: remotePath, total: size, mayReplace: mayReplace))
     }
 
     private func add(_ item: TransferItem) -> TransferItem {
@@ -192,15 +210,15 @@ public final class TransferQueue {
             switch item.kind {
             case .download:
                 let client = try await provider(item.hostID)
-                try await client.download(item.remotePath, to: item.localURL, resume: resume, progress: progress)
+                try await client.download(item.remotePath, to: item.localURL, resume: resume, overwrite: item.overwrite, progress: progress)
             case .upload:
                 let client = try await provider(item.hostID)
-                try await client.upload(item.localURL, to: item.remotePath, resume: resume, progress: progress)
+                try await client.upload(item.localURL, to: item.remotePath, resume: resume, overwrite: item.overwrite, progress: progress)
             case .copyBetweenHosts(let targetHostID, _, let targetPath):
                 let source = try await provider(item.hostID)
                 try await source.download(item.remotePath, to: item.localURL, resume: resume, progress: progress)
                 let target = try await provider(targetHostID)
-                try await target.upload(item.localURL, to: targetPath, resume: false, progress: progress)
+                try await target.upload(item.localURL, to: targetPath, resume: false, overwrite: item.overwrite, progress: progress)
                 try? FileManager.default.removeItem(at: item.localURL)
             }
             guard !Task.isCancelled else { return }

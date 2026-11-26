@@ -28,6 +28,8 @@ final class OpenWithManager {
     private let connections: RemoteConnections
     private(set) var watches: [URL: Watch] = [:]
     private(set) var message: String?
+    /// Called after a saved file was uploaded again (host, remote path), so panes showing its folder can refresh.
+    @ObservationIgnored var onUploaded: ((UUID, String) -> Void)?
 
     init(connections: RemoteConnections) {
         self.connections = connections
@@ -121,6 +123,7 @@ final class OpenWithManager {
             try await client.upload(watch.localURL, to: watch.remotePath)
             watch.lastUpload = .now
             message = "Uploaded \(SFTP.baseName(watch.remotePath)) to \(connections.hostName(watch.hostID)) at \(Date.now.formatted(date: .omitted, time: .shortened))."
+            onUploaded?(watch.hostID, watch.remotePath)
         } catch {
             message = "Could not upload \(SFTP.baseName(watch.remotePath)): \(error.localizedDescription)"
         }
