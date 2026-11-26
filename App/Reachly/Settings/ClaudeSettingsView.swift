@@ -265,9 +265,30 @@ struct ClaudeSettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.orange)
         }
-        Text("The agent needs a model with tool calling; the gateway's list does not say which models support it.")
+        if let selected = caimexModels.first(where: { $0.id == settings.configuration.model }) {
+            if selected.supportsTools == false {
+                Label("CAIMEx says this model can't call tools, so the agent can't run commands with it. Pick one from the list.", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            let details = selected.details()
+            if !details.isEmpty {
+                Text(details.joined(separator: " · "))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        Text(caimexToolsNote)
             .font(.caption)
             .foregroundStyle(.secondary)
+    }
+
+    /// Why the list is shorter than the gateway's: only when the gateway's tags actually left models out.
+    private var caimexToolsNote: String {
+        let left = caimexChoices.withoutToolsCount
+        guard left > 0 else { return "The agent needs a model with tool calling." }
+        let listed = caimexModels.count - left
+        return "The agent runs commands through tool calls, so only the \(listed) models CAIMEx marks as supporting tools are listed."
     }
 
     private func loadCaimexModels() async {

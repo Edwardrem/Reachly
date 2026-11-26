@@ -217,6 +217,56 @@ struct CaimexModelCatalogueTests {
         #expect(models.map(\.id) == ["absent", "chat", "null"])
     }
 
+    @Test func readsToolsTagPricesContextAndHosting() async throws {
+        let body = """
+        {"data":[
+          {"id":"deepseek-v4-flash","capabilities":["chat"],"capability_tags":["tools"],"context_length":1048576,
+           "pricing":{"input_per_1m":"0.38","output_per_1m":"0.8","prompt":"0.00000038"},
+           "hosting_country":"ZW","may_train":false,"zdr":false},
+          {"id":"no-tools","capabilities":["chat"],"capability_tags":["json-mode","vision"],
+           "pricing":{"input_per_1m":0.1,"output_per_1m":0.4},"hosting_country":"us","may_train":true},
+          {"id":"untagged","capabilities":["chat"]},
+          {"id":"null-tags","capabilities":["chat"],"capability_tags":null,"context_length":null,
+           "top_provider":{"context_length":131072},"pricing":null,"hosting_country":null},
+          {"id":"odd-values","capabilities":["chat"],"capability_tags":"tools","context_length":"big",
+           "pricing":{"input_per_1m":"-1","output_per_1m":"free"},"hosting_country":"Zimbabwe","may_train":"no"},
+          {"id":"upper-tag","capabilities":["chat"],"capability_tags":["Tools"]}
+        ]}
+        """
+        let models = try await load(body)
+        let byID = Dictionary(uniqueKeysWithValues: models.map { ($0.id, $0) })
+
+        let flash = try #require(byID["deepseek-v4-flash"])
+        #expect(flash.supportsTools == true)
+        #expect(flash.contextLength == 1_048_576)
+        #expect(flash.inputPricePerMillion == Decimal(string: "0.38"))
+        #expect(flash.outputPricePerMillion == Decimal(string: "0.8"))
+        #expect(flash.hostingCountry == "ZW")
+        #expect(flash.mayTrain == false)
+
+        let noTools = try #require(byID["no-tools"])
+        #expect(noTools.supportsTools == false, "tags present without tools mean the model can't call tools")
+        #expect(noTools.inputPricePerMillion == Decimal(string: "0.1"), "numeric prices are read too")
+        #expect(noTools.hostingCountry == "US")
+        #expect(noTools.mayTrain == true)
+
+        #expect(byID["untagged"]?.supportsTools == nil, "no tags means unknown, not no tools")
+        let nullTags = try #require(byID["null-tags"])
+        #expect(nullTags.supportsTools == nil)
+        #expect(nullTags.contextLength == 131_072, "the top provider's context fills in when the entry has none")
+        #expect(nullTags.inputPricePerMillion == nil)
+
+        let odd = try #require(byID["odd-values"], "unexpected value types never hide a model")
+        #expect(odd.supportsTools == nil)
+        #expect(odd.contextLength == nil)
+        #expect(odd.inputPricePerMillion == nil, "a negative price is not shown")
+        #expect(odd.outputPricePerMillion == nil)
+        #expect(odd.hostingCountry == nil, "only a region code is named")
+        #expect(odd.mayTrain == nil)
+
+        #expect(byID["upper-tag"]?.supportsTools == true)
+    }
+
     @Test func aMissingOrUnreadableDataArrayIsAnError() async {
         for body in [#"{"object":"list"}"#, #"{"data":"nope"}"#] {
             do {

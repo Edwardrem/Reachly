@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import ReachlyAgent
 
@@ -49,5 +50,52 @@ struct CaimexModelChoicesTests {
 
         #expect(choices.ids == ["ollama/qwen3-vl:8b"])
         #expect(missing.ids == ["caimex/auto"])
+    }
+
+    @Test func leavesOutModelsThatCannotCallTools() {
+        let models = [
+            CaimexModel(id: "tools", supportsTools: true),
+            CaimexModel(id: "no-tools", supportsTools: false),
+            CaimexModel(id: "unknown"),
+        ]
+        let choices = CaimexModelChoices(models: models, current: "tools")
+        #expect(choices.ids == ["tools", "unknown"], "a model the gateway didn't describe stays")
+        #expect(choices.withoutToolsCount == 1)
+    }
+
+    @Test func keepsTheCurrentModelEvenWhenItCannotCallTools() {
+        let models = [CaimexModel(id: "tools", supportsTools: true), CaimexModel(id: "no-tools", supportsTools: false)]
+        let choices = CaimexModelChoices(models: models, current: "no-tools")
+        #expect(choices.ids == ["no-tools", "tools"], "the picker must still show what is selected")
+    }
+
+    @Test func untaggedListsHideNothing() {
+        let choices = CaimexModelChoices(models: [CaimexModel(id: "a"), CaimexModel(id: "b")], current: "a")
+        #expect(choices.ids == ["a", "b"])
+        #expect(choices.withoutToolsCount == 0)
+    }
+
+    @Test func detailsNameWhatTheGatewaySaid() {
+        let locale = Locale(identifier: "en_US")
+        let flash = CaimexModel(id: "deepseek-v4-flash", supportsTools: true, contextLength: 1_048_576,
+                                inputPricePerMillion: Decimal(string: "0.38"), outputPricePerMillion: Decimal(string: "0.8"),
+                                hostingCountry: "ZW", mayTrain: false)
+        #expect(flash.details(locale: locale) == [
+            "Tool calling", "1M context", "$0.38 in, $0.80 out per 1M tokens", "Hosted in Zimbabwe", "Not used for training",
+        ])
+        let free = CaimexModel(id: "free", supportsTools: false, inputPricePerMillion: 0, outputPricePerMillion: 0, mayTrain: true)
+        #expect(free.details(locale: locale) == ["No tool calling", "Free", "May be used for training"])
+        #expect(CaimexModel(id: "bare").details(locale: locale).isEmpty, "nothing is claimed the gateway didn't say")
+    }
+
+    @Test func tokenCountsUseShortUnits() {
+        let locale = Locale(identifier: "en_US")
+        #expect(CaimexModel.tokenCount(1_048_576, locale: locale) == "1M")
+        #expect(CaimexModel.tokenCount(1_000_000, locale: locale) == "1M")
+        #expect(CaimexModel.tokenCount(131_072, locale: locale) == "128K")
+        #expect(CaimexModel.tokenCount(128_000, locale: locale) == "128K")
+        #expect(CaimexModel.tokenCount(200_000, locale: locale) == "200K")
+        #expect(CaimexModel.tokenCount(1_572_864, locale: locale) == "1.5M")
+        #expect(CaimexModel.tokenCount(512, locale: locale) == "512")
     }
 }
