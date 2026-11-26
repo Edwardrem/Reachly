@@ -255,6 +255,12 @@ extension LLMProviderConfiguration.Kind {
         }
     }
 
+    /// A typed endpoint's host can change, so its key is tied to the origin it was saved for and is not sent
+    /// anywhere else (`EndpointKeyPolicy`). Anthropic and Caimex keys only ever go to their fixed hosts.
+    public var bindsKeyToEndpoint: Bool {
+        self == .openAICompatible
+    }
+
     /// The provider's page for creating a key, or nil for a typed endpoint, whose key comes from the
     /// user's own server.
     public var keyPageURL: URL? {

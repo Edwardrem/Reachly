@@ -132,11 +132,19 @@ conversations. Your real hosts never leave your Mac.
   each client. The guardrails and audit log apply identically.
 - **AI providers found on this Mac**: Settings → AI Integration lists what is
   already installed, each with one button behind a confirmation that says
-  exactly what will happen; nothing is read, copied or written before the
-  click. A key stored in the Caimex CLI (`caimex auth export` runs only then,
-  and only the Caimex key is kept), LM Studio or Ollama serving on
-  `127.0.0.1` (pick a model, no key), and `ANTHROPIC_API_KEY` or
-  `OPENAI_API_KEY` in Reachly's own environment become the panel's provider.
+  exactly what will happen. To show what is already connected, detection
+  parses Claude Desktop's and Qoder's settings files for a `reachly` entry
+  (keeping only that entry's command), runs `claude mcp get reachly` and
+  `caimex auth list`, and asks `127.0.0.1:1234` and `:11434` for their
+  models; nothing is copied or changed before the click. A key stored in the Caimex CLI (`caimex auth
+  export` runs only then, and only the Caimex key is kept), LM Studio or
+  Ollama serving on `127.0.0.1` (pick a model, no key), and
+  `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in Reachly's own environment become
+  the panel's provider. An endpoint key is tied to the scheme, host and port
+  it was saved for and is never sent anywhere else, so pointing the endpoint
+  at a local server or another host does not carry the key along.
+  Connecting refuses while Reachly runs from a disk image or a translocated
+  copy, since that bridge path would not last.
   Claude Code and Qoder connect to Reachly's MCP server through their own
   `mcp add`; Claude Desktop gets a `reachly` entry in its config, with a
   backup of the file saved next to it first and no existing entry ever

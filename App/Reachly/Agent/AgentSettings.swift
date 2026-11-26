@@ -25,6 +25,8 @@ final class AgentSettings {
     /// The preview of the selected kind's saved key, such as `sk-ant-…a1b2`, read from UserDefaults. Nil
     /// when there is no key, or the key was saved before previews existed.
     private(set) var savedKeyHint: String?
+    /// The origin the selected kind's key was saved for, when that kind ties its key to an endpoint.
+    private(set) var savedKeyOrigin: EndpointOrigin?
     /// Bumped whenever the selected kind's saved key changes, so the panel rebuilds its provider even
     /// when the configuration (kind, model, URL) looks the same.
     private(set) var keyVersion = 0
@@ -33,6 +35,8 @@ final class AgentSettings {
     private let migration: APIKeyMigration
     /// Written only after the Keychain write or delete it describes has succeeded.
     private let hints = APIKeyHintStore()
+    /// The origin each key was saved for, written next to its preview.
+    private let origins = APIKeyOriginStore()
 
     private init() {
         let stored: LLMProviderConfiguration
@@ -43,6 +47,8 @@ final class AgentSettings {
             stored = LLMProviderConfiguration()
         }
         configuration = stored
+        // An endpoint key saved before origins were recorded counts as saved for the base URL configured now.
+        origins.recordUpgradeOrigin(baseURL: stored.baseURL)
 
         let migration = APIKeyMigration()
         // Decide who owns the 0.3.8 key before anything reads it; this also retries a pending move.
@@ -50,6 +56,7 @@ final class AgentSettings {
         self.migration = migration
         hasAPIKey = migration.hasKey(for: stored.kind)
         savedKeyHint = hasAPIKey ? hints.hint(for: stored.kind) : nil
+        savedKeyOrigin = hasAPIKey && stored.kind.bindsKeyToEndpoint ? migration.savedOrigin(for: stored.kind) : nil
     }
 
     private func save() {
@@ -63,7 +70,19 @@ final class AgentSettings {
     func refreshKeyState() {
         hasAPIKey = migration.hasKey(for: configuration.kind)
         savedKeyHint = hasAPIKey ? hints.hint(for: configuration.kind) : nil
+        savedKeyOrigin = hasAPIKey && configuration.kind.bindsKeyToEndpoint ? migration.savedOrigin(for: configuration.kind) : nil
     }
+
+    /// Set when the selected endpoint's saved key is not sent, because it was saved for another origin.
+    var keyOriginMismatch: String? {
+        let kind = configuration.kind
+        guard hasAPIKey, kind.bindsKeyToEndpoint,
+              !EndpointKeyPolicy.mayUseKey(kind: kind, savedOrigin: savedKeyOrigin, baseURL: configuration.baseURL) else { return nil }
+        return EndpointKeyPolicy.mismatchMessage(savedOrigin: savedKeyOrigin)
+    }
+
+    /// A key is saved for the selected kind and will be sent to its current host.
+    var hasUsableAPIKey: Bool { hasAPIKey && keyOriginMismatch == nil }
 
     /// Captures the provider's inputs before any prompt, so a picker change while Touch ID is up cannot
     /// retarget the key, the host or the recorded version. Retries a pending move first.
@@ -84,6 +103,14 @@ final class AgentSettings {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return try removeAPIKey() }
         let kind = configuration.kind
+        // An endpoint key belongs to the origin it is saved for, captured with the kind before any write.
+        var origin: EndpointOrigin?
+        if kind.bindsKeyToEndpoint {
+            guard let current = EndpointOrigin(baseURL: configuration.baseURL) else {
+                throw AgentSetupError(message: "Enter the endpoint's base URL first, so the key is saved for that endpoint. Nothing was saved.")
+            }
+            origin = current
+        }
         // A pending move withholds the account: retry it, but never write to the old one.
         migration.retryPendingMove()
         guard let account = migration.accountForSaving(kind) else {
@@ -93,8 +120,10 @@ final class AgentSettings {
         try hints.save(trimmed, for: kind) {
             try SecretStore.shared.set(trimmed, account: account, label: kind.keychainLabel)
         }
+        origins.set(origin, for: kind)
         hasAPIKey = true
         savedKeyHint = hints.hint(for: kind)
+        savedKeyOrigin = origin
         keyVersion += 1
     }
 
@@ -105,8 +134,10 @@ final class AgentSettings {
         try hints.remove(for: kind) {
             try SecretStore.shared.delete(account: account)
         }
+        origins.forget(kind)
         hasAPIKey = false
         savedKeyHint = nil
+        savedKeyOrigin = nil
         keyVersion += 1
     }
 
