@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 
 /// Where an endpoint lives: scheme, host and port, with the default port filled in. An OpenAI-compatible
 /// endpoint's key is tied to the origin it was saved for and is sent nowhere else.
@@ -28,6 +29,52 @@ public struct EndpointOrigin: Sendable, Hashable, CustomStringConvertible {
     }
 
     private var hostInURL: String { host.contains(":") ? "[\(host)]" : host }
+}
+
+/// A model request's redirect policy, passed as the request's own task delegate so the session stays shared.
+/// It follows a redirect only to the request's own origin, or from `http://host` to `https://host`: the same
+/// server, over TLS. Anything else is refused, so the key in the request's headers never reaches another
+/// server, and `throwIfRefused()` then reports where the endpoint tried to send it. One guard per request.
+public final class EndpointRedirectGuard: NSObject, URLSessionTaskDelegate, Sendable {
+    private let origin: EndpointOrigin?
+    private let refusedTarget = Mutex<String?>(nil)
+
+    public init(for url: URL) {
+        self.origin = EndpointOrigin(baseURL: url.absoluteString)
+    }
+
+    /// Each hop is checked against the first request's origin, so a chain cannot walk away from it.
+    public static func mayFollow(from origin: EndpointOrigin?, to url: URL?) -> Bool {
+        guard let origin, let url, let target = EndpointOrigin(baseURL: url.absoluteString) else { return false }
+        if target == origin { return true }
+        return origin.scheme == "http" && origin.port == 80 && target.scheme == "https" && target.port == 443 && target.host == origin.host
+    }
+
+    public func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest) async -> URLRequest? {
+        if Self.mayFollow(from: origin, to: request.url) { return request }
+        let shown = request.url.flatMap { EndpointOrigin(baseURL: $0.absoluteString)?.description } ?? "another address"
+        refusedTarget.withLock { $0 = shown }
+        return nil
+    }
+
+    /// Throws when a redirect was refused; the refused 3xx answer is then not reported as an ordinary failure.
+    public func throwIfRefused() throws {
+        if let target = refusedTarget.withLock({ $0 }) { throw EndpointRedirectError(target: target) }
+    }
+}
+
+/// The endpoint answered with a redirect to another server, which Reachly did not follow.
+public struct EndpointRedirectError: LocalizedError, Equatable, Sendable {
+    /// The origin it redirected to, as `scheme://host[:port]`.
+    public let target: String
+
+    public init(target: String) {
+        self.target = target
+    }
+
+    public var errorDescription: String? {
+        "The endpoint redirected to \(target); Reachly doesn't follow redirects to another server."
+    }
 }
 
 /// Which saved key may go to which endpoint.
