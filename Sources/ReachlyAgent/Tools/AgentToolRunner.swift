@@ -121,7 +121,7 @@ public final class AgentToolRunner {
             guard let buffer = host.terminalBuffer(on: target, maxLines: maxLines) else {
                 return "No terminal is open on \(target.name)."
             }
-            return "<terminal_buffer host=\"\(xmlEscape(target.name))\" lines=\"\(buffer.split(separator: "\n", omittingEmptySubsequences: false).count)\">\n\(buffer)\n</terminal_buffer>"
+            return "<terminal_buffer host=\"\(xmlEscape(target.name))\" lines=\"\(buffer.split(separator: "\n", omittingEmptySubsequences: false).count)\">\n\(Self.neutralizingWrapperTags(buffer))\n</terminal_buffer>"
         case .createDocument:
             let fileName = try string("file_name", in: input)
             guard let format = DocumentFormat(rawValue: (input["format"]?.stringValue ?? "").lowercased().trimmingCharacters(in: .whitespaces)) else {
@@ -217,7 +217,7 @@ public final class AgentToolRunner {
         }
         let truncated = output.stdout.count > maxBytes
         let text = String(decoding: output.stdout.prefix(maxBytes), as: UTF8.self)
-        return "<file host=\"\(xmlEscape(target.name))\" path=\"\(xmlEscape(path))\" bytes=\"\(min(output.stdout.count, maxBytes))\" truncated=\"\(truncated)\">\n\(text)\n</file>"
+        return "<file host=\"\(xmlEscape(target.name))\" path=\"\(xmlEscape(path))\" bytes=\"\(min(output.stdout.count, maxBytes))\" truncated=\"\(truncated)\">\n\(Self.neutralizingWrapperTags(text))\n</file>"
     }
 
     private func writeFile(on target: AgentHostInfo, path: String, contents: Data, append: Bool, mode: String?, reason: String) async throws -> String {
@@ -388,13 +388,24 @@ public final class AgentToolRunner {
         let stderr = clip(output.stderr)
         let status = output.exitStatus.map(String.init) ?? (output.signal.map { "signal \($0)" } ?? "unknown")
         var text = "<command_output host=\"\(xmlEscape(target.name))\" exit_status=\"\(status)\" duration_ms=\"\(output.duration.components.seconds * 1000 + output.duration.components.attoseconds / 1_000_000_000_000_000)\" truncated=\"\(stdout.truncated || stderr.truncated)\">\n"
-        text += stdout.text
+        text += Self.neutralizingWrapperTags(stdout.text)
         if !stderr.text.isEmpty {
-            text += (stdout.text.isEmpty || stdout.text.hasSuffix("\n") ? "" : "\n") + "--- stderr ---\n" + stderr.text
+            text += (stdout.text.isEmpty || stdout.text.hasSuffix("\n") ? "" : "\n") + "--- stderr ---\n" + Self.neutralizingWrapperTags(stderr.text)
         }
         if !text.hasSuffix("\n") { text += "\n" }
         text += "</command_output>"
         return text
+    }
+
+    /// Escapes the `<` of any wrapper tag (`command_output`, `file`, `terminal_buffer`) inside text that came
+    /// from a host, so a log line written to look like the end of the output, followed by "instructions",
+    /// cannot close its wrapper or open a new one. Everything else is passed on unchanged: the model still
+    /// reads the text, as data.
+    nonisolated static func neutralizingWrapperTags(_ text: String) -> String {
+        guard text.contains("<"),
+              let tag = try? NSRegularExpression(pattern: #"<(\s*/?\s*(?:command_output|file|terminal_buffer))(?=[\s>/]|$)"#, options: [.caseInsensitive])
+        else { return text }
+        return tag.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "&lt;$1")
     }
 
     private func clip(_ data: Data) -> (text: String, truncated: Bool) {
