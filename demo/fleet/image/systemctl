@@ -1,0 +1,82 @@
+#!/bin/bash
+# systemctl for this host's services (no systemd in this image): answers for the units it runs.
+since() { date -d "@$(stat -c %Y /proc/$1)" '+%a %Y-%m-%d %H:%M:%S %Z'; }
+wants=/etc/systemd/system/timers.target.wants
+args=(); for a in "$@"; do case "$a" in --no-pager|--full|-l|--all|-a|--quiet|-q|--now) ;; *) args+=("$a");; esac; done
+cmd=${args[0]}; unit=${args[1]}; [ -n "$unit" ] && [[ "$unit" != *.* ]] && unit=$unit.service
+proc_of() { case "$1" in nginx.service) pgrep -o -x nginx;; ssh.service|sshd.service) pgrep -o -x sshd;; orders-api.service) pgrep -o -f orders-api;; esac; }
+desc_of() { case "$1" in nginx.service) echo "A high performance web server and a reverse proxy server";; ssh.service|sshd.service) echo "OpenBSD Secure Shell server";; orders-api.service) echo "Shop orders API";; logrotate.service) echo "Rotate log files";; logrotate.timer) echo "Daily rotation of log files";; *) echo "";; esac; }
+timer_enabled() { [ -e "$wants/logrotate.timer" ]; }
+case "$cmd" in
+  status)
+    [ -z "$unit" ] && { echo "● $(hostname)"; echo "    State: running"; echo "    Units: 162 loaded"; echo "     Jobs: 0 queued"; echo "   Failed: 0 units"; exit 0; }
+    case "$unit" in
+      logrotate.timer)
+        if timer_enabled; then st="enabled"; act="active (waiting) since $(date '+%a %Y-%m-%d %H:%M:%S %Z')"; trig="$(date -d 'tomorrow 00:00' '+%a %Y-%m-%d %H:%M:%S %Z')"; else st="disabled"; act="inactive (dead)"; trig="n/a"; fi
+        echo "○ logrotate.timer - Daily rotation of log files"
+        echo "     Loaded: loaded (/usr/lib/systemd/system/logrotate.timer; $st; preset: enabled)"
+        echo "     Active: $act"; echo "    Trigger: $trig"; echo "   Triggers: ● logrotate.service"; echo "       Docs: man:logrotate(8)"
+        echo "             man:logrotate.conf(5)"; timer_enabled && exit 0 || exit 3 ;;
+      logrotate.service)
+        last=$(sed -n 's/^"\/var\/log\/nginx\/\*\.log" //p' /var/lib/logrotate/status | head -1)
+        echo "○ logrotate.service - Rotate log files"
+        echo "     Loaded: loaded (/usr/lib/systemd/system/logrotate.service; static)"
+        echo "     Active: inactive (dead)"
+        echo "TriggeredBy: ○ logrotate.timer"; echo "       Docs: man:logrotate(8)"; echo "             man:logrotate.conf(5)"; exit 3 ;;
+    esac
+    pid=$(proc_of "$unit")
+    if [ -n "$pid" ]; then
+      echo "● $unit - $(desc_of "$unit")"
+      echo "     Loaded: loaded (/usr/lib/systemd/system/$unit; enabled; preset: enabled)"
+      echo "     Active: active (running) since $(since $pid)"
+      echo "   Main PID: $pid (${unit%.service})"
+      echo "      Tasks: $(ls /proc/$pid/task | wc -l) (limit: 9367)"
+      echo "     Memory: $(( $(awk '/VmRSS/{print $2}' /proc/$pid/status) / 1024 ))M"
+      exit 0
+    fi
+    echo "Unit $unit could not be found." >&2; exit 4 ;;
+  is-active)
+    case "$unit" in logrotate.timer) timer_enabled && { echo active; exit 0; } || { echo inactive; exit 3; };; esac
+    [ -n "$(proc_of "$unit")" ] && { echo active; exit 0; } || { echo inactive; exit 3; } ;;
+  is-enabled)
+    case "$unit" in logrotate.timer) timer_enabled && { echo enabled; exit 0; } || { echo disabled; exit 1; };; logrotate.service) echo static; exit 0;; esac
+    [ -n "$(desc_of "$unit")" ] && { echo enabled; exit 0; } || { echo "Failed to get unit file state for $unit: No such file or directory" >&2; exit 1; } ;;
+  is-failed) echo active; exit 1 ;;
+  list-timers)
+    printf '%-28s %-12s %-28s %-12s %-24s %s\n' NEXT LEFT LAST PASSED UNIT ACTIVATES
+    printf '%-28s %-12s %-28s %-12s %-24s %s\n' "$(date -d '+3 hours' '+%a %Y-%m-%d %H:%M:%S UTC')" "3h left" "$(date -d '-9 hours' '+%a %Y-%m-%d %H:%M:%S UTC')" "9h ago" "apt-daily.timer" "apt-daily.service"
+    printf '%-28s %-12s %-28s %-12s %-24s %s\n' "$(date -d 'tomorrow 06:12' '+%a %Y-%m-%d %H:%M:%S UTC')" "13h left" "$(date -d 'today 06:12' '+%a %Y-%m-%d %H:%M:%S UTC')" "10h ago" "apt-daily-upgrade.timer" "apt-daily-upgrade.service"
+    printf '%-28s %-12s %-28s %-12s %-24s %s\n' "$(date -d 'next sunday 03:10' '+%a %Y-%m-%d %H:%M:%S UTC')" "3 days left" "$(date -d 'last sunday 03:10' '+%a %Y-%m-%d %H:%M:%S UTC')" "4 days ago" "e2scrub_all.timer" "e2scrub_all.service"
+    printf '%-28s %-12s %-28s %-12s %-24s %s\n' "$(date -d 'next monday 00:00' '+%a %Y-%m-%d %H:%M:%S UTC')" "4 days left" "$(date -d 'last monday 00:00' '+%a %Y-%m-%d %H:%M:%S UTC')" "3 days ago" "fstrim.timer" "fstrim.service"
+    timer_enabled && printf '%-28s %-12s %-28s %-12s %-24s %s\n' "$(date -d 'tomorrow 00:00' '+%a %Y-%m-%d %H:%M:%S UTC')" "7h left" "-" "-" "logrotate.timer" "logrotate.service"
+    echo; timer_enabled && echo "5 timers listed." || echo "4 timers listed."
+    echo "Pass --all to see loaded but inactive timers, too." ;;
+  list-units|--failed|list-unit-files)
+    if printf '%s ' "$@" | grep -q -- '--failed\|--state=failed'; then echo "  UNIT LOAD ACTIVE SUB DESCRIPTION"; echo; echo "0 loaded units listed."; exit 0; fi
+    printf '  %-28s %-7s %-7s %-8s %s\n' UNIT LOAD ACTIVE SUB DESCRIPTION
+    for u in nginx.service orders-api.service ssh.service; do printf '  %-28s %-7s %-7s %-8s %s\n' "$u" loaded active running "$(desc_of $u)"; done
+    echo; echo "3 loaded units listed." ;;
+  enable|disable)
+    for u in "${args[@]:1}"; do
+      [[ "$u" != *.* ]] && u=$u.service
+      if [ "$u" = logrotate.timer ]; then
+        [ "$(id -u)" = 0 ] || { echo "Failed to $cmd unit: Access denied" >&2; exit 1; }
+        if [ "$cmd" = enable ]; then ln -sf /usr/lib/systemd/system/logrotate.timer "$wants/logrotate.timer"; echo "Created symlink $wants/logrotate.timer → /usr/lib/systemd/system/logrotate.timer."
+        else rm -f "$wants/logrotate.timer"; echo "Removed \"$wants/logrotate.timer\"."; fi
+      fi
+    done ;;
+  start|restart|reload|stop|try-restart|reload-or-restart)
+    [ "$(id -u)" = 0 ] || { echo "Failed to $cmd $unit: Access denied" >&2; exit 1; }
+    case "$unit" in
+      nginx.service) case "$cmd" in stop) nginx -s quit;; start) nginx;; reload) nginx -s reload;; *) nginx -s quit; sleep 1; nginx;; esac ;;
+      logrotate.service) /usr/sbin/logrotate /etc/logrotate.conf ;;
+      logrotate.timer) [ "$cmd" = stop ] || timer_enabled || ln -sf /usr/lib/systemd/system/logrotate.timer "$wants/logrotate.timer" ;;
+      orders-api.service) pkill -f orders-api; sleep 0.3; setsid -f runuser -u www-data -- /usr/local/bin/orders-api >/dev/null 2>&1 ;;
+      ssh.service|sshd.service) ;;
+      *) echo "Failed to $cmd $unit: Unit $unit not found." >&2; exit 5 ;;
+    esac ;;
+  daemon-reload) ;;
+  cat)
+    [ -f "/usr/lib/systemd/system/$unit" ] && { echo "# /usr/lib/systemd/system/$unit"; cat "/usr/lib/systemd/system/$unit"; } || { echo "No files found for $unit." >&2; exit 1; } ;;
+  *) echo "Unknown command verb '$cmd'." >&2; exit 1 ;;
+esac
