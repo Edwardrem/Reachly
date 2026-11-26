@@ -29,12 +29,22 @@ public enum FileNaming {
         return nil
     }
 
-    /// `name` as a message can show it: control characters (a null among them) become "�", and a long name is
-    /// shortened with "…".
+    /// `name` as a message can show it: control characters (a null among them) and characters that change how the
+    /// text around them reads become "�", and a long name is shortened with "…".
     public static func displayed(_ name: String) -> String {
-        var shown = String(String.UnicodeScalarView(name.unicodeScalars.map { $0.properties.generalCategory == .control ? "\u{FFFD}" : $0 }))
+        var shown = String(String.UnicodeScalarView(name.unicodeScalars.map { isDisguising($0) ? "\u{FFFD}" : $0 }))
         if shown.count > 60 { shown = String(shown.prefix(60)) + "…" }
         return shown
+    }
+
+    /// True for a control character, or one that reorders or breaks the text around it without being seen: the
+    /// bidirectional marks, embeddings, overrides and isolates, and the line and paragraph separators. A name could
+    /// use them to pass for another ("txt.exe" shown as "exe.txt"). Joiners stay, as emoji are built with them.
+    static func isDisguising(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x061C, 0x200E, 0x200F, 0x2028, 0x2029, 0x202A...0x202E, 0x2066...0x2069: true
+        default: scalar.properties.generalCategory == .control
+        }
     }
 
     /// The Finder-style name for a copy that is not in `existing`: "report copy.txt", then "report copy 2.txt", …

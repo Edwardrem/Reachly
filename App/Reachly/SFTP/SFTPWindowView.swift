@@ -495,7 +495,7 @@ struct MoveSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(items.count == 1 ? "Move “\(items[0].name)”" : "Move \(items.count) Items").font(.headline)
+            Text(items.count == 1 ? "Move “\(FileNaming.displayed(items[0].name))”" : "Move \(items.count) Items").font(.headline)
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     TextField("Folder", text: $path, prompt: Text(folder))

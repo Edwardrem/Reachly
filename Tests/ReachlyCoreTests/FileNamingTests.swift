@@ -73,6 +73,23 @@ import Testing
         #expect(long.count == 61 && long.hasSuffix("…"))
     }
 
+    @Test func displayedNamesCantReorderOrBreakTheTextAroundThem() {
+        // "invoice\u{202E}fdp.exe" would read as "invoiceexe.pdf".
+        #expect(FileNaming.displayed("invoice\u{202E}fdp.exe") == "invoice\u{FFFD}fdp.exe")
+        let disguising: [Unicode.Scalar] = [
+            "\u{061C}", "\u{200E}", "\u{200F}", "\u{2028}", "\u{2029}",
+            "\u{202A}", "\u{202B}", "\u{202C}", "\u{202D}", "\u{202E}",
+            "\u{2066}", "\u{2067}", "\u{2068}", "\u{2069}",
+        ]
+        for scalar in disguising {
+            #expect(FileNaming.displayed("a\(scalar)b") == "a\u{FFFD}b", "U+\(String(scalar.value, radix: 16, uppercase: true))")
+        }
+        // Right-to-left letters, accents and emoji built with joiners are names like any other.
+        for name in ["שלום.txt", "ملف.txt", "e\u{301}te\u{301}.txt", "👨‍👩‍👧 photos", "日本語"] {
+            #expect(FileNaming.displayed(name) == name)
+        }
+    }
+
     // MARK: copyName
 
     @Test func fileCopiesKeepTheExtension() {

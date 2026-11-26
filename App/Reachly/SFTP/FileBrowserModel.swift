@@ -579,7 +579,7 @@ final class PaneModel: Identifiable {
             try await backend.rename(item.path, to: target)
             operationMessage = nil
         } catch {
-            operationMessage = "Could not rename “\(item.name)”: \(Self.describe(error))"
+            operationMessage = "Could not rename “\(FileNaming.displayed(item.name))”: \(Self.describe(error))"
             return
         }
         await finishOperation(changing: [folder], on: backend, select: [target])
@@ -629,11 +629,12 @@ final class PaneModel: Identifiable {
     }
 
     private struct Failure {
+        /// The item's name as a message shows it (see `FileNaming.displayed`).
         var name: String
         var reason: String
 
         init(name: String, reason: String) {
-            self.name = name
+            self.name = FileNaming.displayed(name)
             self.reason = reason
         }
 
@@ -646,7 +647,7 @@ final class PaneModel: Identifiable {
     /// item can be acted on. Names on this Mac come from its own file system and are always one item's.
     private func unusable(_ item: FileItem) -> Failure? {
         guard source.isRemote, let problem = item.nameProblem else { return nil }
-        return Failure(name: FileNaming.displayed(item.name), reason: "Its name can't be used. \(problem)")
+        return Failure(name: item.name, reason: "Its name can't be used. \(problem)")
     }
 
     /// Puts an operation's failures into `operationMessage` (nil when there were none).
