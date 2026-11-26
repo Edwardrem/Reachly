@@ -143,7 +143,9 @@ conversations. Your real hosts never leave your Mac.
   Retry. However a reply ends (answered, stopped, failed, Qoder gone), the
   sheets it was waiting on go, and a command it asks for after that gets no
   sheet. Each conversation keeps its Qoder session, and a restarted Qoder
-  loads it back when it offers `session/load`.
+  loads it back when it offers `session/load`, but only if that session saw
+  every message so far: after an edit, or a turn another provider answered,
+  Qoder starts a new session and the transcript says so.
 - **Guardrails**: each host is read-only (a safe list such as `ls`, `cat`,
   `systemctl status`), ask (every command in an approval sheet) or allowlist
   (your patterns run, everything else asks). Destructive patterns (`rm -rf`,

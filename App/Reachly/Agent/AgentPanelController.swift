@@ -568,6 +568,7 @@ final class AgentPanelController {
         providerKind = nil
         let session = AgentSession(provider: PlaceholderProvider(), systemPrompt: systemPrompt(providerName: settings.configuration.kind.agentName), toolRunner: runner, messages: messages)
         session.transcriptDidChange = { [weak self] in self?.persist() }
+        session.externalSessionStore = Self.externalAgentSessions
         return session
     }
 

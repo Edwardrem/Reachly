@@ -421,8 +421,13 @@ final class FakeACPRun {
         agent = ACPAgent(configuration: configuration)
     }
 
+    /// The last message each conversation sent, so a turn with `earlier` follows it as in a real transcript.
+    private var lastSent: [String: UUID] = [:]
+
     func turn(_ text: String = "is web-01 low on disk?", key: String = "conversation-1", earlier: Bool = false) -> ExternalAgentTurn {
-        ExternalAgentTurn(conversationKey: key, message: .user(text), context: "Reachly context", hasEarlierTurns: earlier)
+        let message = AgentMessage.user(text)
+        defer { lastSent[key] = message.id }
+        return ExternalAgentTurn(conversationKey: key, message: message, context: "Reachly context", hasEarlierTurns: earlier, previousUserMessageID: earlier ? lastSent[key] : nil)
     }
 
     func run(_ turn: ExternalAgentTurn? = nil) async throws -> ExternalAgentStopReason {

@@ -31,6 +31,9 @@ public final class AgentSession {
     public private(set) var streamingBlocks: [AgentContentBlock] = []
     /// The ACP message the streaming text belongs to; a chunk with another id starts a new block.
     private var streamingMessageID: String?
+    /// Where an external agent's sessions are saved for `session/load`. `rewind` and `clear` forget the
+    /// conversation's entry here even while another provider answers, when the agent is not running.
+    public var externalSessionStore: ACPSessionStore?
     public var systemPrompt: String
     public let toolRunner: AgentToolRunner
     public var tools: [AgentToolDefinition] = AgentTools.all
@@ -162,7 +165,7 @@ public final class AgentSession {
     public func clear() {
         guard !isRunning else { return }
         messages = []
-        externalAgent?.forgetSession(for: externalConversationKey)
+        forgetExternalSession()
         lastError = nil
         transcriptDidChange?()
     }
@@ -201,10 +204,15 @@ public final class AgentSession {
         // Cutting at any id can leave a reply with unanswered calls at the end.
         messages = AgentTranscript.healed(messages)
         // An external agent's session still holds what was cut.
-        externalAgent?.forgetSession(for: externalConversationKey)
+        forgetExternalSession()
         lastError = nil
         transcriptDidChange?()
         return message
+    }
+
+    private func forgetExternalSession() {
+        externalAgent?.forgetSession(for: externalConversationKey)
+        externalSessionStore?.set(nil, for: externalConversationKey)
     }
 
     private func start() {
@@ -393,12 +401,13 @@ public final class AgentSession {
         resetStreaming()
         guard let index = messages.lastIndex(where: { $0.role == .user && $0.failure == nil }) else { return }
         let message = messages[index]
-        let earlier = messages[..<index].contains { $0.role == .user && $0.failure == nil && (!$0.text.isEmpty || !$0.attachments.isEmpty) }
+        let previous = messages[..<index].last { $0.role == .user && $0.failure == nil && (!$0.text.isEmpty || !$0.attachments.isEmpty) }
         let turn = ExternalAgentTurn(
             conversationKey: externalConversationKey,
             message: message,
             context: systemPrompt,
-            hasEarlierTurns: earlier)
+            hasEarlierTurns: previous != nil,
+            previousUserMessageID: previous?.id)
         let stop: ExternalAgentStopReason
         do {
             stop = try await agent.run(turn) { [weak self] event in

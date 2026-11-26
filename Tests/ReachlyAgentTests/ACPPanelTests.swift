@@ -147,6 +147,95 @@ struct AgentSessionExternalAgentTests {
         #expect(other.messages[1].blocks == [.notice("Qoder finished without a reply.")])
     }
 
+    private static let newSessionNotice = AgentContentBlock.notice("Qoder started a new session, so it doesn't know the earlier messages in this conversation.")
+
+    /// A session saved to the agent's store, with a conversation id as the panel gives it, and a model provider
+    /// for the turns another provider answers.
+    private func makeStoredSession(_ run: FakeACPRun, replies: [String]) -> AgentSession {
+        let provider = FakeProvider(responses: replies.map { FakeProvider.reply($0) })
+        let session = AgentSession(provider: provider, systemPrompt: "Reachly context", toolRunner: AgentToolRunner(host: FakeToolHost(hosts: []), source: .agentPanel, conversationID: UUID()))
+        session.externalAgent = run.agent
+        session.externalSessionStore = run.agent.configuration.sessionStore
+        return session
+    }
+
+    /// Another provider answers: the agent process goes, as it does in the panel.
+    private func switchAway(_ session: AgentSession, _ run: FakeACPRun) {
+        session.externalAgent = nil
+        run.agent.shutdown()
+    }
+
+    @Test func aSessionThatMissedAnotherProvidersTurnIsNotLoadedAgain() async throws {
+        let run = FakeACPRun("loadable", store: true)
+        defer { run.finish() }
+        let session = makeStoredSession(run, replies: ["From the other provider."])
+        session.send("first")
+        await waitUntilDone(session)
+
+        switchAway(session, run)
+        session.send("second")
+        await waitUntilDone(session)
+        #expect(session.messages.last?.text == "From the other provider.")
+
+        session.externalAgent = run.agent
+        session.send("third")
+        await waitUntilDone(session)
+        #expect(run.received("session/load").isEmpty, "the saved session never saw the second message")
+        #expect(run.received("session/new").count == 2)
+        #expect(session.messages.last?.blocks.contains(Self.newSessionNotice) == true, "the transcript says so")
+        let prompt = try #require(run.received("session/prompt").last)
+        #expect(prompt["params"]?["prompt"]?.arrayValue?.first?["text"]?.stringValue == "Reachly context", "a new session gets the context")
+    }
+
+    @Test func anEditWhileAnotherProviderAnswersForgetsTheSavedSession() async throws {
+        let run = FakeACPRun("loadable", store: true)
+        defer { run.finish() }
+        let session = makeStoredSession(run, replies: [])
+        let key = session.externalConversationKey
+        session.send("first")
+        await waitUntilDone(session)
+        session.send("second")
+        await waitUntilDone(session)
+        #expect(run.agent.configuration.sessionStore?.sessionID(for: key) == "sess-1")
+
+        switchAway(session, run)
+        let second = try #require(session.messages.last { $0.role == .user && $0.text == "second" })
+        session.rewind(to: second.id)
+        #expect(run.agent.configuration.sessionStore?.sessionID(for: key) == nil, "forgotten with no agent running")
+
+        session.externalAgent = run.agent
+        session.send("second, edited")
+        await waitUntilDone(session)
+        #expect(run.received("session/load").isEmpty)
+        #expect(run.received("session/new").count == 2)
+        #expect(session.messages.last?.blocks.contains(Self.newSessionNotice) == true)
+    }
+
+    @Test func aSessionIsUsedAgainOnlyWhenItSawEverythingBefore() {
+        let first = AgentMessage.user("first")
+        let second = AgentMessage.user("second")
+        let turn = ExternalAgentTurn(conversationKey: "A", message: second, context: "", hasEarlierTurns: true, previousUserMessageID: first.id)
+        #expect(ACPAgent.knowsEverythingBefore(turn, lastMessage: first.id))
+        #expect(ACPAgent.knowsEverythingBefore(turn, lastMessage: second.id), "Retry sends the same message again")
+        #expect(!ACPAgent.knowsEverythingBefore(turn, lastMessage: UUID()), "it missed a message")
+        #expect(!ACPAgent.knowsEverythingBefore(turn, lastMessage: nil), "saved before Reachly kept the message, or never sent one")
+        let opening = ExternalAgentTurn(conversationKey: "A", message: first, context: "", hasEarlierTurns: false)
+        #expect(ACPAgent.knowsEverythingBefore(opening, lastMessage: nil))
+    }
+
+    @Test func theSameAgentAnsweringEveryTurnLoadsItsSessionBack() async throws {
+        let run = FakeACPRun("loadable", store: true)
+        defer { run.finish() }
+        let session = makeStoredSession(run, replies: [])
+        session.send("first")
+        await waitUntilDone(session)
+        run.agent.shutdown()
+        session.send("second")
+        await waitUntilDone(session)
+        #expect(run.received("session/load").count == 1, "nothing was missed, so the session comes back")
+        #expect(!(session.messages.last?.blocks.contains(Self.newSessionNotice) ?? true))
+    }
+
     @Test func editingAnEarlierMessageStartsANewAgentSession() async throws {
         let run = FakeACPRun("basic")
         defer { run.finish() }

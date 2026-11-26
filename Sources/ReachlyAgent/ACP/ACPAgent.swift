@@ -107,8 +107,13 @@ public final class ACPAgent: ExternalAgent {
     private var connection: ACPConnection?
     /// What the next turn says about how the agent was started (`fallbackNotices`).
     private var launchNotices: [String] = []
-    /// The session each conversation uses in the running agent.
-    private var liveSessions: [String: String] = [:]
+    /// The session each conversation uses in the running agent, and the last of its messages that session was sent.
+    private var liveSessions: [String: LiveSession] = [:]
+
+    private struct LiveSession {
+        var id: String
+        var lastMessage: UUID?
+    }
     /// The session being restored with `session/load`: its replayed history is already in the transcript.
     private var replaying: String?
     private var turn: TurnState?
@@ -140,7 +145,7 @@ public final class ACPAgent: ExternalAgent {
         for notice in launchNotices { events(.notice(notice)) }
         launchNotices = []
         try Task.checkCancellation()
-        let (sessionID, isNew) = try await session(for: turn.conversationKey, on: connection)
+        let (sessionID, isNew) = try await session(for: turn, on: connection)
         if isNew, turn.hasEarlierTurns {
             events(.notice("\(name) started a new session, so it doesn't know the earlier messages in this conversation."))
         }
@@ -152,6 +157,9 @@ public final class ACPAgent: ExternalAgent {
         let turnID = state.id
         self.turn = state
         defer { endTurn(turnID) }
+        // From here the session has been sent this message: a later turn may use it again.
+        liveSessions[turn.conversationKey]?.lastMessage = turn.message.id
+        configuration.sessionStore?.set(sessionID, for: turn.conversationKey, lastMessage: turn.message.id)
         do {
             let result = try await withTaskCancellationHandler {
                 try await connection.request("session/prompt", params: ACPProtocol.promptParams(sessionID: sessionID, content: content))
@@ -266,17 +274,22 @@ public final class ACPAgent: ExternalAgent {
 
     /// The conversation's session in the running agent: the live one, the one it had before when the agent can
     /// load it, or a new one. True when the session is new, so it has none of the conversation's history.
-    private func session(for conversationKey: String, on connection: ACPConnection) async throws -> (String, Bool) {
-        if let live = liveSessions[conversationKey] { return (live, false) }
+    private func session(for turn: ExternalAgentTurn, on connection: ACPConnection) async throws -> (String, Bool) {
+        let conversationKey = turn.conversationKey
+        if let live = liveSessions[conversationKey] {
+            if Self.knowsEverythingBefore(turn, lastMessage: live.lastMessage) { return (live.id, false) }
+            liveSessions[conversationKey] = nil
+        }
         let cwd = configuration.workingDirectory
         let servers = configuration.mcpServers(conversationKey)
-        if agentInfo?.loadSession == true, let saved = configuration.sessionStore?.sessionID(for: conversationKey) {
-            replaying = saved
+        if agentInfo?.loadSession == true, let saved = configuration.sessionStore?.saved(for: conversationKey),
+           Self.knowsEverythingBefore(turn, lastMessage: saved.lastMessage) {
+            replaying = saved.session
             defer { replaying = nil }
             do {
-                _ = try await setupRequest("session/load", params: ACPProtocol.loadSessionParams(sessionID: saved, cwd: cwd, mcpServers: servers), timeout: configuration.sessionTimeout, on: connection)
-                liveSessions[conversationKey] = saved
-                return (saved, false)
+                _ = try await setupRequest("session/load", params: ACPProtocol.loadSessionParams(sessionID: saved.session, cwd: cwd, mcpServers: servers), timeout: configuration.sessionTimeout, on: connection)
+                liveSessions[conversationKey] = LiveSession(id: saved.session, lastMessage: saved.lastMessage)
+                return (saved.session, false)
             } catch let error as ACPError {
                 // Gone, expired or unreadable: start a new one, unless the agent itself went away.
                 if case .agentExited = error { throw failure(for: error, during: "loading the session") }
@@ -285,7 +298,7 @@ public final class ACPAgent: ExternalAgent {
         do {
             let result = try await setupRequest("session/new", params: ACPProtocol.newSessionParams(cwd: cwd, mcpServers: servers), timeout: configuration.sessionTimeout, on: connection)
             let id = try ACPProtocol.sessionID(from: result)
-            liveSessions[conversationKey] = id
+            liveSessions[conversationKey] = LiveSession(id: id, lastMessage: nil)
             configuration.sessionStore?.set(id, for: conversationKey)
             return (id, true)
         } catch is CancellationError {
@@ -293,6 +306,12 @@ public final class ACPAgent: ExternalAgent {
         } catch {
             throw failure(for: error, during: "starting a session")
         }
+    }
+
+    /// Whether a session last sent `lastMessage` has everything before this turn: it was sent the user message
+    /// just before this one, or this one itself (Retry after a failure).
+    static func knowsEverythingBefore(_ turn: ExternalAgentTurn, lastMessage: UUID?) -> Bool {
+        lastMessage == turn.previousUserMessageID || lastMessage == turn.message.id
     }
 
     /// A request made before the prompt (initialize, session/new, session/load). ACP has no way to cancel

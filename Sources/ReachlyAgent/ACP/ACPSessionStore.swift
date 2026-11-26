@@ -12,20 +12,33 @@ public struct ACPSessionStore: Sendable {
         self.url = url
     }
 
+    /// A conversation's session, and the last of the conversation's messages it was sent.
+    public struct Saved: Sendable, Equatable {
+        public var session: String
+        /// Nil for an entry saved before Reachly kept it, which is then never loaded for a later turn.
+        public var lastMessage: UUID?
+    }
+
     private struct Entry: Codable {
         var conversation: String
         var session: String
+        var lastMessage: UUID?
         var savedAt: Date
     }
 
-    public func sessionID(for conversation: String) -> String? {
-        load().last { $0.conversation == conversation }?.session
+    public func saved(for conversation: String) -> Saved? {
+        load().last { $0.conversation == conversation }.map { Saved(session: $0.session, lastMessage: $0.lastMessage) }
     }
 
-    public func set(_ session: String?, for conversation: String) {
+    public func sessionID(for conversation: String) -> String? {
+        saved(for: conversation)?.session
+    }
+
+    /// Remembers `session` for the conversation, having been sent `lastMessage`; nil forgets it.
+    public func set(_ session: String?, for conversation: String, lastMessage: UUID? = nil) {
         var entries = load().filter { $0.conversation != conversation }
         if let session {
-            entries.append(Entry(conversation: conversation, session: session, savedAt: .now))
+            entries.append(Entry(conversation: conversation, session: session, lastMessage: lastMessage, savedAt: .now))
         }
         if entries.count > Self.limit { entries.removeFirst(entries.count - Self.limit) }
         save(entries)
