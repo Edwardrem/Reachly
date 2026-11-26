@@ -222,6 +222,98 @@ struct AgentSessionFailureTests {
         #expect(session.messages.filter { $0.role == .user }.count == 1)
     }
 
+    @Test func retryThatCannotStartKeepsTheReplyThatFailed() async {
+        let provider = FakeProvider(responses: [])
+        provider.failures[0] = FakeStreamFailure(thinking: "Looking first.", text: "Root is at", error: LLMError.api(type: "overloaded_error", message: "Overloaded"))
+        let session = makeSession(provider)
+        session.send("check the disk")
+        await waitUntilDone(session)
+
+        #expect(session.recordSetupFailure("Touch ID was cancelled."))
+        let row = session.messages[1]
+        #expect(session.messages.count == 2, "no second row")
+        #expect(Array(row.blocks.prefix(2)) == [.thinking(text: "Looking first.", signature: nil), .text("Root is at")])
+        #expect(row.failure == AgentFailure(kind: .error, message: "Overloaded (overloaded_error)", retryError: "Touch ID was cancelled."), "the reply did fail; it is not called unsent")
+        #expect(row.failure?.summary == "The request failed: Overloaded (overloaded_error). Retry did not start: Touch ID was cancelled.")
+        #expect(session.lastError == "Touch ID was cancelled.")
+
+        // A second failed retry replaces the reason rather than adding to it.
+        session.recordSetupFailure("Add your Caimex API key in Settings › AI Integration to start.")
+        #expect(session.messages[1].failure?.retryError == "Add your Caimex API key in Settings › AI Integration to start.")
+        #expect(session.messages[1].failure?.message == "Overloaded (overloaded_error)")
+        #expect(session.canRetry)
+    }
+
+    @Test func retryThatCannotStartAfterACutOffReplyKeepsTheCutOff() async {
+        let provider = FakeProvider(responses: [FakeProvider.reply("A long answer", stop: .maxTokens)])
+        let session = makeSession(provider)
+        session.send("explain")
+        await waitUntilDone(session)
+
+        session.recordSetupFailure("Touch ID was cancelled.")
+        #expect(session.messages.last?.failure?.kind == .cutOff)
+        #expect(session.messages.last?.failure?.summary == "The reply was cut off at the model's output limit. Send \"continue\" to go on. Retry did not start: Touch ID was cancelled.")
+    }
+
+    @Test func retryStartedInAnotherConversationChangesNothing() async {
+        let provider = FakeProvider(responses: [FakeProvider.reply("for A")])
+        provider.failures[0] = FakeStreamFailure(error: LLMError.httpStatus(503, ""))
+        let session = makeSession(provider)
+        session.send("question in A")
+        await waitUntilDone(session)
+        #expect(session.canRetry)
+        let inA = session.conversationToken
+
+        // While Retry waited on Touch ID, B was opened from History. It ends in a row of its own.
+        let b: [AgentMessage] = [.user("question in B"), AgentMessage(failure: AgentFailure(kind: .error, message: "Overloaded"))]
+        session.replace(messages: b)
+        var saves = 0
+        session.transcriptDidChange = { saves += 1 }
+        #expect(session.conversationToken != inA)
+
+        #expect(!session.retry(in: inA), "A's retry does not run B's turn")
+        #expect(!session.recordSetupFailure("Touch ID was cancelled.", in: inA), "nor rewrite B's row")
+        #expect(!session.isRunning)
+        #expect(provider.requests.count == 1)
+        #expect(session.messages == b)
+        #expect(saves == 0, "nothing was saved into B")
+
+        // B's own token acts on B.
+        #expect(session.retry(in: session.conversationToken))
+        await waitUntilDone(session)
+        #expect(session.messages.map(\.text) == ["question in B", "for A"])
+    }
+
+    @Test func messageWrittenInAnotherConversationIsNotDelivered() async {
+        let provider = FakeProvider(responses: [FakeProvider.reply("ok")])
+        let session = makeSession(provider)
+        let inA = session.conversationToken
+        let file = AgentAttachment(fileName: "notes.txt", mediaType: "text/plain", byteCount: 5, path: "/tmp/reachly-notes.txt")
+
+        session.replace(messages: [.user("B"), AgentMessage(role: .assistant, blocks: [.text("hello from B")])])
+        let inB = session.conversationToken
+        var saves = 0
+        session.transcriptDidChange = { saves += 1 }
+
+        #expect(!session.send("typed in A", attachments: [file], in: inA))
+        #expect(!session.recordUnsent("typed in A", attachments: [file], reason: "No key", in: inA))
+        #expect(session.messages.map(\.text) == ["B", "hello from B"])
+        #expect(!session.messages.contains { !$0.attachments.isEmpty })
+        #expect(provider.requests.isEmpty)
+        #expect(saves == 0)
+
+        // Work in the conversation that is still showing keeps its token throughout.
+        #expect(session.send("typed in B", in: inB))
+        await waitUntilDone(session)
+        #expect(session.conversationToken == inB)
+        #expect(session.rewind(to: session.messages[2].id) != nil)
+        #expect(session.recordUnsent("again in B", reason: "No key", in: inB))
+        #expect(session.retry(in: inB))
+        await waitUntilDone(session)
+        #expect(session.conversationToken == inB)
+        #expect(session.messages.map(\.text) == ["B", "hello from B", "again in B", "(no scripted reply)"])
+    }
+
     @Test func emptyUnsentMessageIsIgnored() {
         let session = makeSession(FakeProvider(responses: []))
         session.recordUnsent("   ", reason: "No key")

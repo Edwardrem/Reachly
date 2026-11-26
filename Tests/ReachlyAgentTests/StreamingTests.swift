@@ -212,6 +212,8 @@ struct TranscriptTests {
             .user("hello"),
             AgentMessage(failure: AgentFailure(kind: .error, message: "Overloaded (overloaded_error)"), partial: [.thinking(text: "t", signature: nil), .text("half")], model: "m"),
             .user("again"),
+            AgentMessage(failure: AgentFailure(kind: .refusal, message: "The model declined to continue.", retryError: "Touch ID was cancelled.")),
+            .user("once more"),
             AgentMessage(failure: AgentFailure(kind: .setup, message: "Add your Claude API key in Settings › AI Integration to start.")),
         ]
         let data = try AgentTranscript.encode(messages)
@@ -220,7 +222,8 @@ struct TranscriptTests {
         #expect(decoded.map(\.role) == messages.map(\.role))
         #expect(decoded.map(\.id) == messages.map(\.id))
         #expect(decoded.map(\.model) == messages.map(\.model))
-        #expect(decoded.map(\.failure?.kind) == [nil, .error, nil, .setup])
+        #expect(decoded.map(\.failure?.kind) == [nil, .error, nil, .refusal, nil, .setup])
+        #expect(decoded[3].failure?.retryError == "Touch ID was cancelled.")
 
         let json = try JSONValue.parse(data)
         let row = json.arrayValue?.last?["blocks"]?.arrayValue?.first

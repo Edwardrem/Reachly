@@ -32,6 +32,9 @@ final class AgentPanelController {
     /// Bumped when the user sends or retries, so the transcript goes to its end
     /// and follows the reply even if it had been scrolled up.
     private(set) var scrollToEndRequest = 0
+    /// Text from a send that was given back because another conversation was
+    /// showing by the time it could start. The composer takes it with `takeRestoredDraft`.
+    private(set) var restoredDraft: String?
     /// Bumped whenever the saved conversation list changes.
     private(set) var conversationsVersion = 0
     /// Files attached to the message being written, in the order they were added.
@@ -277,6 +280,10 @@ final class AgentPanelController {
         guard session.canSend, !isPreparing else { return }
         let files = pendingAttachments
         let edited = editing
+        // Building the provider can wait on Touch ID, and History, the scope menu
+        // or New Conversation can show another conversation meanwhile. The message
+        // belongs to the one it was written in.
+        let started = session.conversationToken
         pendingAttachments = []
         attachmentError = nil
         isPreparing = true
@@ -289,21 +296,47 @@ final class AgentPanelController {
             } catch {
                 setupFailure = error.localizedDescription
             }
+            guard self.session === session, session.conversationToken == started else {
+                // Another conversation is showing: nothing goes into it. The text
+                // and files go back to the composer instead.
+                restoreUnsent(trimmed, files: files, edited: edited)
+                return
+            }
+            // Until the edit is applied, the original message keeps its files.
+            var stillEditing = edited
             if let edited, editing?.id == edited.id {
                 // The rewritten message takes the place of the original and of
                 // every reply that followed it. Files taken off the edit go with it.
                 editing = nil
+                stillEditing = nil
                 session.rewind(to: edited.id)
                 let kept = Set(files.map(\.id))
                 for file in edited.attachments where !kept.contains(file.id) { AttachmentImporter.discard(file) }
             }
-            if let setupFailure {
+            let delivered = if let setupFailure {
                 // The message and its files stay in the transcript with the reason
                 // under it, and Retry sends them once the key is set.
-                session.recordUnsent(trimmed, attachments: files, reason: setupFailure)
+                session.recordUnsent(trimmed, attachments: files, reason: setupFailure, in: started)
             } else {
-                session.send(trimmed, attachments: files)
+                session.send(trimmed, attachments: files, in: started)
             }
+            if !delivered { restoreUnsent(trimmed, files: files, edited: stillEditing) }
+        }
+    }
+
+    func takeRestoredDraft() -> String? {
+        defer { restoredDraft = nil }
+        return restoredDraft
+    }
+
+    /// Puts an unsent message back in the composer. Files that came with an
+    /// earlier message being edited stay with that message, in its own
+    /// conversation; files added since go back to the pending list.
+    private func restoreUnsent(_ text: String, files: [AgentAttachment], edited: AgentMessage?) {
+        let original = Set(edited?.attachments.map(\.id) ?? [])
+        pendingAttachments = files.filter { !original.contains($0.id) } + pendingAttachments
+        if !text.isEmpty {
+            restoredDraft = restoredDraft.map { $0 + "\n\n" + text } ?? text
         }
     }
 
@@ -318,15 +351,18 @@ final class AgentPanelController {
     /// row says why instead of a new one being added.
     func retry() {
         guard let session, session.canRetry, !isPreparing else { return }
+        // As in `send`: the retry is for the conversation showing now. If another
+        // one is showing once the provider is ready, nothing happens.
+        let started = session.conversationToken
         isPreparing = true
         scrollToEndRequest += 1
         Task {
             defer { isPreparing = false }
             do {
                 try await prepareProvider(for: session)
-                session.retry()
+                session.retry(in: started)
             } catch {
-                session.recordSetupFailure(error.localizedDescription)
+                session.recordSetupFailure(error.localizedDescription, in: started)
             }
         }
     }
