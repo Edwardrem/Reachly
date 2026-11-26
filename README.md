@@ -173,7 +173,10 @@ conversations. Your real hosts never leave your Mac.
   (Settings → Cloud holds read-only credentials in the Keychain; File →
   Import From → Cloud Provider lists instances with tags and public/private
   IPs and adds the chosen ones through the reviewed import). Export saved
-  hosts into a managed block of `~/.ssh/config`.
+  hosts into a managed block of `~/.ssh/config`. Servers already trusted in
+  `~/.ssh/known_hosts` appear under *Detected on this Mac* in the sidebar; Add
+  saves one as a host and trusts the same keys in Reachly, so the first
+  connection does not ask again.
 - **Backups**: the last 10 exports and pre-import snapshots are kept under
   Application Support → Reachly → Backups and listed in Settings → Data.
 - **Updates**: Sparkle 2 fed by an appcast on GitHub Pages, with a

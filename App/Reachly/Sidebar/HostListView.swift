@@ -19,8 +19,14 @@ struct HostListView: View {
     @AppStorage("sidebar.collapsedGroups") private var collapsedGroupsRaw = ""
     @State private var dropTarget: UUID?
     @State private var groupToDelete: HostGroup?
+    /// Servers in ~/.ssh/known_hosts, for the "Detected on this Mac" section.
+    @State private var detected = DetectedHostsModel()
+    /// Detected servers the user hid (`SystemKnownHosts.Server.id`), remembered between launches.
+    @AppStorage("sidebar.hiddenDetectedHosts") private var hiddenDetectedRaw = ""
+    @AppStorage("sidebar.detectedExpanded") private var detectedExpanded = true
 
     var body: some View {
+        let suggestions = detectedSuggestions
         List(selection: $selection) {
             let ungrouped = HostGrouping.members(of: nil, in: hosts)
             if !ungrouped.isEmpty {
@@ -28,6 +34,7 @@ struct HostListView: View {
                     hostRows(ungrouped, in: nil)
                 } header: {
                     groupHeader(nil, name: "Hosts", color: nil, count: ungrouped.count)
+                        .contextMenu { showHiddenDetectedItem(suggestions, divider: false) }
                 }
             }
             ForEach(groups) { group in
@@ -59,6 +66,7 @@ struct HostListView: View {
                             Button("Delete Group…", role: .destructive) {
                                 if members.isEmpty { delete(group) } else { groupToDelete = group }
                             }
+                            showHiddenDetectedItem(suggestions)
                         }
                 }
             }
@@ -77,18 +85,33 @@ struct HostListView: View {
                     }
                 }
             }
+            if !suggestions.servers.isEmpty {
+                DetectedHostsSection(
+                    suggestions: suggestions,
+                    scan: detected.scan,
+                    isExpanded: $detectedExpanded,
+                    add: addDetected,
+                    hide: hideDetected,
+                    showHidden: showHiddenDetected)
+            }
         }
         .listStyle(.sidebar)
         .themedList()
         .navigationTitle("Hosts")
         .overlay {
-            if hosts.isEmpty, serialProfiles.isEmpty {
-                ContentUnavailableView(
-                    "No Hosts",
-                    systemImage: "server.rack",
-                    description: Text("Add your first SSH host with ⌘N."))
+            if hosts.isEmpty, serialProfiles.isEmpty, suggestions.servers.isEmpty {
+                ContentUnavailableView {
+                    Label("No Hosts", systemImage: "server.rack")
+                } description: {
+                    Text("Add your first SSH host with ⌘N.")
+                } actions: {
+                    if suggestions.hiddenCount > 0 {
+                        Button(showHiddenDetectedTitle(suggestions.hiddenCount), action: showHiddenDetected)
+                    }
+                }
             }
         }
+        .detectsKnownHosts(detected)
         .onKeyPress(.return, phases: .down) { press in
             guard press.modifiers.contains(.command), let host = selectedHost else { return .ignored }
             connect(host)
@@ -276,6 +299,54 @@ struct HostListView: View {
     private func delete(_ group: HostGroup) {
         // Hosts are kept (relationship is nullify) and move back to "Hosts".
         modelContext.delete(group)
+    }
+
+    // MARK: - Detected on this Mac
+
+    private var hiddenDetected: Set<String> {
+        Set(hiddenDetectedRaw.split(separator: ",").map(String.init))
+    }
+
+    /// Detected servers not yet in Reachly, filtered against the live hosts.
+    private var detectedSuggestions: SystemKnownHosts.Suggestions {
+        SystemKnownHosts.suggestions(
+            from: detected.scan,
+            existing: hosts.map { SystemKnownHosts.Endpoint(host: $0.hostname, port: $0.port) },
+            hidden: hiddenDetected)
+    }
+
+    /// Saves the server as a host, then trusts its known keys under the saved
+    /// hostname and port: exactly what a session asks the store about.
+    private func addDetected(_ server: SystemKnownHosts.Server) {
+        let host = SystemKnownHosts.makeHost(for: server, sortOrder: HostGrouping.nextSortOrder(after: HostGrouping.members(of: nil, in: hosts)))
+        modelContext.insert(host)
+        try? modelContext.save()
+        selection = host.uuid
+        let keys = server.keys, hostname = host.hostname, port = host.port
+        Task {
+            _ = try? await SystemKnownHosts.trust(keys, hostname: hostname, port: port, in: .shared)
+        }
+    }
+
+    private func hideDetected(_ servers: [SystemKnownHosts.Server]) {
+        hiddenDetectedRaw = hiddenDetected.union(servers.map(\.id)).sorted().joined(separator: ",")
+    }
+
+    private func showHiddenDetected() {
+        hiddenDetectedRaw = ""
+    }
+
+    private func showHiddenDetectedTitle(_ count: Int) -> String {
+        count == 1 ? "Show 1 Hidden Detected Host" : "Show \(count) Hidden Detected Hosts"
+    }
+
+    /// Brings hidden servers back once the section itself is gone (every one hidden).
+    @ViewBuilder
+    private func showHiddenDetectedItem(_ suggestions: SystemKnownHosts.Suggestions, divider: Bool = true) -> some View {
+        if suggestions.servers.isEmpty, suggestions.hiddenCount > 0 {
+            if divider { Divider() }
+            Button(showHiddenDetectedTitle(suggestions.hiddenCount), action: showHiddenDetected)
+        }
     }
 
     private func open(_ profile: SerialProfile) {
