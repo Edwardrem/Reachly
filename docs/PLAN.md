@@ -22,6 +22,7 @@ _Nov 3, 2026 · Rufaro Mutepfa_
 | — | Reachly 1.0.1 | **Done** (Nov 25, 2026) — the Settings tab for providers and the MCP server is renamed from Claude to AI Integration, with help text, errors, README and site docs to match (`docs/releases/1.0.1.md`) |
 | — | Reachly 1.1.0 | **Done** (Nov 26, 2026) — servers from `~/.ssh/known_hosts` in the sidebar, AI providers found on this Mac with a first-launch setup sheet, key links / show-hide / masked preview, Qoder in the chat panel over ACP, comments on approvals, AI History, Files window file operations (New File, Duplicate, Move to, Copy / Cut / Paste, Files menu) with no-overwrite and Cut-only-what-arrived, a chat that follows the reply and keeps failed requests (`docs/releases/1.1.0.md`) |
 | — | Reachly 1.1.1 | **Done** (Nov 26, 2026) — long chats no longer go blank (the transcript lays out every message and the streaming reply redraws at most ten times a second); the Caimex model picker lists only models tagged for tool calling and shows context, price, hosting country and training |
+| — | Reachly 1.1.2 | **Done** (Nov 26, 2026) — wrapper tags inside host text are escaped so a log line cannot pose as instructions, an adversarial prompt-injection test suite, docs/SECURITY.md, a README section on verifying tests, releases and updates, and steadier CI (sshd readiness, live-test diagnostics, an MCP test race) |
 
 ## Export / import instead of sync
 
