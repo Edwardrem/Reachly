@@ -221,6 +221,10 @@ enum FakeACPAgent {
             let code = (answer?["error"] as? [String: Any])?["code"] as? Int
             text(session, "fs: \(code.map(String.init) ?? "answered")")
             respond(id, result: ["stopReason": "end_turn"])
+        case "env":
+            // The names of the variables it was started with, so a test can see what reached it.
+            text(session, ProcessInfo.processInfo.environment.keys.sorted().joined(separator: ","))
+            respond(id, result: ["stopReason": "end_turn"])
         case "maxtokens":
             text(session, "Half a reply")
             respond(id, result: ["stopReason": "max_tokens"])

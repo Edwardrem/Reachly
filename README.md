@@ -126,7 +126,10 @@ conversations. Your real hosts never leave your Mac.
   folder of its own under Application Support. Before each start Reachly
   follows the chosen path's links and runs the file they lead to, never one
   inside an app bundle (the Qoder editor's own `qoder` launcher).
-  Qoder uses its own sign-in and models, which Reachly never reads. Reachly
+  Qoder uses its own sign-in and models, which Reachly never reads. From
+  Reachly's environment it gets only `HOME`, `USER`, `LOGNAME`, `SHELL`,
+  `TMPDIR`, `LANG`, `LC_*`, `TERM`, `QODER_*` and a fuller `PATH`: no other
+  provider's key, no other token, no `SSH_AUTH_SOCK`. Reachly
   advertises no file system or terminal access and hands Qoder its own MCP
   bridge, so every command on a server goes through the guardrails, the
   approval sheet ("Qoder wants to run…") and the audit log, filed under the

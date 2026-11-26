@@ -667,6 +667,32 @@ struct ACPAgentProcessTests {
         #expect(!subcommand.events.contains { if case .notice = $0 { true } else { false } })
     }
 
+    @Test func theAgentGetsOnlyTheEnvironmentItNeeds() async throws {
+        let inherited = [
+            "HOME": "/Users/me", "USER": "me", "LOGNAME": "me", "SHELL": "/bin/zsh", "TMPDIR": "/var/folders/xy/T/",
+            "LANG": "en_GB.UTF-8", "LC_ALL": "en_GB.UTF-8", "PATH": "/usr/bin:/bin",
+            "QODER_PERSONAL_ACCESS_TOKEN": "qoder-sign-in",
+            "ANTHROPIC_API_KEY": "sk-ant-secret", "OPENAI_API_KEY": "sk-secret", "SSH_AUTH_SOCK": "/private/tmp/ssh-agent.sock",
+            "FOO_TOKEN": "t", "AWS_SECRET_ACCESS_KEY": "k", "GITHUB_TOKEN": "g", "DYLD_INSERT_LIBRARIES": "/tmp/x.dylib",
+        ]
+        let environment = ACPLaunch.environment(inherited: inherited, executables: ["/Users/me/.local/bin/qoder", "/Users/me/.qoder/versions/1/qodercli"], home: "/Users/me")
+        #expect(environment["PATH"]?.hasPrefix("/Users/me/.local/bin:/Users/me/.qoder/versions/1:") == true, "the agent's own folders first")
+        #expect(environment["NO_COLOR"] == "1")
+        #expect(environment["QODER_PERSONAL_ACCESS_TOKEN"] == "qoder-sign-in", "Qoder's own sign-in reaches it")
+
+        // What the agent process actually sees.
+        let run = FakeACPRun("env", environment: environment)
+        defer { run.finish() }
+        _ = try await run.run()
+        let names = Set((run.texts.first ?? "").split(separator: ",").map(String.init))
+        for name in ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "SSH_AUTH_SOCK", "FOO_TOKEN", "AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "DYLD_INSERT_LIBRARIES"] {
+            #expect(!names.contains(name), "\(name) must not reach the agent")
+        }
+        #expect(names.isSuperset(of: ["HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "PATH", "NO_COLOR", "QODER_PERSONAL_ACCESS_TOKEN"]))
+        let unexpected = names.filter { !$0.hasPrefix("FAKE_ACP_") && !$0.hasPrefix("__CF") && !ACPLaunch.environmentNames.contains($0) && !ACPLaunch.environmentPrefixes.contains(where: $0.hasPrefix) && !["PATH", "NO_COLOR"].contains($0) }
+        #expect(unexpected.isEmpty, "nothing else: \(unexpected)")
+    }
+
     @Test func anAgentThatNeverInitializesIsASetupFailureAndIsNotTriedAgain() async throws {
         let run = FakeACPRun("silent-init", initializeTimeout: .seconds(1))
         defer { run.finish() }

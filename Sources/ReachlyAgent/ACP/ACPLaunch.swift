@@ -26,6 +26,31 @@ public enum ACPLaunch {
         return .success(resolved)
     }
 
+    /// The variables an agent Reachly runs for the chat panel gets from Reachly's own environment, by name.
+    public static let environmentNames: Set<String> = ["HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "TERM"]
+    /// And by prefix: the locale, and the agent's own settings (`QODER_PERSONAL_ACCESS_TOKEN` is Qoder's sign-in).
+    public static let environmentPrefixes = ["LC_", "QODER_"]
+
+    /// The agent's environment: only the variables above, PATH with the agent's folders and the usual bin folders
+    /// on it (an app opened from the Finder gets a short PATH, and agents start helpers by name), and colour off.
+    /// Everything else stays behind: other providers' keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, which go only to
+    /// their provider), any other `*_TOKEN` or `*_KEY`, and `SSH_AUTH_SOCK`, which would let the agent's own shell
+    /// `ssh` to servers with the user's agent keys and around Reachly's guardrails.
+    public static func environment(inherited: [String: String], executables: [String], home: String) -> [String: String] {
+        var environment = inherited.filter { name, _ in
+            environmentNames.contains(name) || environmentPrefixes.contains { name.hasPrefix($0) }
+        }
+        if environment["HOME"]?.isEmpty != false { environment["HOME"] = home }
+        let folders = executables.map { URL(fileURLWithPath: $0).deletingLastPathComponent().path }
+            + AIProviderLocations.binDirectories(home: home)
+            + ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+            + (inherited["PATH"] ?? "").split(separator: ":").map(String.init)
+        var seen = Set<String>()
+        environment["PATH"] = folders.filter { !$0.isEmpty && seen.insert($0).inserted }.joined(separator: ":")
+        environment["NO_COLOR"] = "1"
+        return environment
+    }
+
     /// What a command line tool prints when it doesn't know an argument it was given, in the wordings common
     /// argument parsers use (commander, yargs, clap, cobra, getopt, argparse).
     static let refusalPhrases = [

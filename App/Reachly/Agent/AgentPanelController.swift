@@ -495,8 +495,8 @@ final class AgentPanelController {
         return externalAgent.isAnswering(request.conversationID?.uuidString)
     }
 
-    /// How Qoder is run: the CLI in ACP mode (`--acp`, then `acp`), in Reachly's own folder, with the app's
-    /// environment and the usual bin folders on PATH, and Reachly's stdio MCP bridge in every session. The
+    /// How Qoder is run: the CLI in ACP mode in its default permission mode, in Reachly's own folder, with an
+    /// allowlisted environment (`ACPLaunch.environment`), and Reachly's stdio MCP bridge in every session. The
     /// bridge finds the server's port and token in Reachly's data folder itself, so no token is handed over,
     /// and it tells the server which conversation the commands belong to.
     /// `command` is the path chosen in Settings and `executable` the file it leads to, which is what runs.
@@ -513,7 +513,8 @@ final class AgentPanelController {
             // doesn't know the option runs without it, and the transcript says so.
             argumentSets: [["--acp"] + permissionMode, ["--acp"], ["acp"] + permissionMode, ["acp"]],
             fallbackNotices: ["--permission-mode": "\(name) didn't accept --permission-mode default, so it runs in the permission mode its own settings choose."],
-            environment: ProviderDetector.toolEnvironment(for: command, home: home),
+            // Only what Qoder needs from Reachly's environment: no other provider's key, no SSH agent socket.
+            environment: ACPLaunch.environment(inherited: ProcessInfo.processInfo.environment, executables: [command, executable], home: home.path),
             workingDirectory: externalAgentWorkspace,
             mcpServers: { conversation in
                 [ACPProtocol.StdioMCPServer(
