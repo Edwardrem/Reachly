@@ -101,9 +101,30 @@ public struct LocalModelServerProbe: Sendable {
         var request = URLRequest(url: server.modelsURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: Self.timeout)
         request.httpMethod = "GET"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        guard let (data, response) = try? await session.data(for: request),
+        // A redirect could lead the probe off loopback; it is refused, and the 3xx itself counts as "not running".
+        guard let (bytes, response) = try? await session.bytes(for: request, delegate: NoRedirects.shared),
               let http = response as? HTTPURLResponse else { return .notRunning }
-        return Self.state(status: http.statusCode, body: data)
+        guard http.statusCode == 200 else { return Self.state(status: http.statusCode, body: Data()) }
+        // The cap holds while the body streams in, so an endless body never fills memory.
+        var body = Data()
+        do {
+            for try await byte in bytes {
+                guard body.count < Self.maximumBodyBytes else { return .notRunning }
+                body.append(byte)
+            }
+        } catch {
+            return .notRunning
+        }
+        return Self.state(status: http.statusCode, body: body)
+    }
+
+    /// Refuses every redirect, so the request stays on the loopback URL it was made for.
+    final class NoRedirects: NSObject, URLSessionTaskDelegate, Sendable {
+        static let shared = NoRedirects()
+
+        func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest) async -> URLRequest? {
+            nil
+        }
     }
 
     /// The probe's verdict for one HTTP answer.

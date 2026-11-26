@@ -138,9 +138,15 @@ struct ClaudeSettingsView: View {
                         Text(hint).font(.body.monospaced())
                     }
                 }
+                if let mismatch = settings.keyOriginMismatch {
+                    Label(mismatch, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 HStack(spacing: 6) {
-                    Image(systemName: settings.hasAPIKey ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(settings.hasAPIKey ? .green : .secondary)
+                    Image(systemName: settings.hasUsableAPIKey ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(settings.hasUsableAPIKey ? .green : .secondary)
                     Text(keyMessage ?? keyHelp)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -286,6 +292,7 @@ struct ClaudeSettingsView: View {
     }
 
     private var keyPlaceholder: String {
+        if settings.keyOriginMismatch != nil { return "Paste a key for this endpoint" }
         if settings.hasAPIKey { return "Saved in the Keychain — paste to replace" }
         switch kind {
         case .anthropic: return "sk-ant-…"
@@ -295,6 +302,9 @@ struct ClaudeSettingsView: View {
     }
 
     private var keyHelp: String {
+        if settings.hasAPIKey, kind.bindsKeyToEndpoint, let origin = settings.savedKeyOrigin {
+            return "A key for \(origin) is saved in your login Keychain, scoped to this app, behind the same lock as your passwords. It is sent only to \(origin)."
+        }
         if settings.hasAPIKey {
             return "A key is saved in your login Keychain for \(kind.displayName), scoped to this app, behind the same lock as your passwords. Each provider keeps its own key."
         }
@@ -304,7 +314,7 @@ struct ClaudeSettingsView: View {
         case .caimex:
             return "Bring your own Caimex key: it is stored in the Keychain and sent only to the Caimex gateway. Each provider keeps its own key."
         case .openAICompatible:
-            return "Optional for local servers. A key here is stored in the Keychain and sent only to the endpoint you typed. Each provider keeps its own key."
+            return "Optional for local servers. A key here is stored in the Keychain and sent only to the scheme, host and port of the base URL above. Each provider keeps its own key."
         }
     }
 

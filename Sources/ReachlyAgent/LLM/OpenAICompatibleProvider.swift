@@ -129,7 +129,10 @@ public struct OpenAICompatibleProvider: LLMProvider {
     private func run(_ request: LLMRequest, continuation: AsyncThrowingStream<LLMStreamEvent, Error>.Continuation) async throws {
         let urlRequest = urlRequest(for: request)
 
-        let (bytes, response) = try await session.bytes(for: urlRequest)
+        // The key is in the headers: a redirect to another server is refused and reported as such.
+        let redirects = EndpointRedirectGuard(for: baseURL)
+        let (bytes, response) = try await session.bytes(for: urlRequest, delegate: redirects)
+        try redirects.throwIfRefused()
         guard let http = response as? HTTPURLResponse else { throw LLMError.invalidResponse("not an HTTP response") }
         if http.statusCode != 200 {
             var body = Data()

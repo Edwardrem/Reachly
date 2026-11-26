@@ -24,7 +24,7 @@ struct AIIntegrationSetupView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Label("Set Up AI Integration", systemImage: "sparkles")
                     .font(.title2.weight(.semibold))
-                Text("Reachly looked for AI tools already on this Mac. Nothing is read, copied or changed until you click a button, and each button says what it will do first.")
+                Text("Reachly looked for AI tools already on this Mac. To see whether Reachly is already connected, it reads Claude Desktop's and Qoder's settings files for a reachly entry and asks Claude Code with claude mcp get. Nothing is copied or changed until you click a button, and each button says what it will do first.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -101,7 +101,7 @@ struct AIIntegrationSetupView: View {
 
     /// Whether the Claude panel can work now, so the sheet can be closed with confidence.
     private var readinessLine: some View {
-        let usable = AIProviderReadiness.isUsable(settings.configuration, hasKey: settings.hasAPIKey)
+        let usable = AIProviderReadiness.isUsable(settings.configuration, hasKey: settings.hasUsableAPIKey)
         return HStack(spacing: 6) {
             Image(systemName: usable ? "checkmark.circle.fill" : "circle")
                 .foregroundStyle(usable ? .green : .secondary)
@@ -145,7 +145,7 @@ enum AIIntegrationOnboarding {
         let settings = AgentSettings.shared
         settings.refreshKeyState()
         let alreadyDone = defaults.bool(forKey: doneKey)
-        let show = AIProviderReadiness.shouldOfferSetup(alreadyDone: alreadyDone, configuration: settings.configuration, hasKey: settings.hasAPIKey)
+        let show = AIProviderReadiness.shouldOfferSetup(alreadyDone: alreadyDone, configuration: settings.configuration, hasKey: settings.hasUsableAPIKey)
         if !show, !alreadyDone { markDone() }
         return show
     }

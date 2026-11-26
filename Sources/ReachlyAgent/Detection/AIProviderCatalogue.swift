@@ -76,13 +76,21 @@ public struct AIProviderPrompt: Sendable, Equatable {
     public var detail: String?
     /// The confirming button; nil when the prompt only informs and has nothing to confirm.
     public var confirmTitle: String?
+    /// The command that runs on confirmation, exactly as shown: the path the user saw is the path that runs.
+    public var command: MCPConnectCommand?
+    /// The config file written on confirmation, and the bridge path written into it.
+    public var configFile: String?
+    public var bridgePath: String?
 
-    public init(title: String, message: String, steps: [String] = [], detail: String? = nil, confirmTitle: String?) {
+    public init(title: String, message: String, steps: [String] = [], detail: String? = nil, confirmTitle: String?, command: MCPConnectCommand? = nil, configFile: String? = nil, bridgePath: String? = nil) {
         self.title = title
         self.message = message
         self.steps = steps
         self.detail = detail
         self.confirmTitle = confirmTitle
+        self.command = command
+        self.configFile = configFile
+        self.bridgePath = bridgePath
     }
 }
 
@@ -111,16 +119,20 @@ public struct AIProviderRow: Sendable, Equatable, Identifiable {
     public let detail: String
     public let status: Status
     public let actions: [AIProviderAction]
-    /// Why something can't be used, or what to do next.
+    /// Why something can't be used, or what to do next. Reachly's own text; commands are marked with backticks.
     public let note: String?
+    /// A value read from another app's file, such as the command of an existing entry. Shown verbatim and never
+    /// interpreted, so nothing in it can become a link or formatting.
+    public let quoted: String?
 
-    public init(id: ID, title: String, detail: String, status: Status, actions: [AIProviderAction] = [], note: String? = nil) {
+    public init(id: ID, title: String, detail: String, status: Status, actions: [AIProviderAction] = [], note: String? = nil, quoted: String? = nil) {
         self.id = id
         self.title = title
         self.detail = detail
         self.status = status
         self.actions = actions
         self.note = note
+        self.quoted = quoted
     }
 }
 
@@ -173,7 +185,7 @@ public enum AIProviderCatalogue {
                 actions: [.openLink(.caimexKeys)],
                 note: "Sign in with `caimex auth login`, then click Check Again. Or paste a key from caimex.ai under API key.")
         }
-        let inUse = reachly.kind == .caimex && reachly.hasKey
+        let inUse = reachly.kind == .caimex && reachly.hasUsableKey
         return AIProviderRow(
             id: .caimex, title: "Caimex CLI",
             detail: inUse ? "A key is stored in the CLI. Caimex is selected in Reachly and has a key." : "A key is stored in the CLI.",
@@ -201,7 +213,8 @@ public enum AIProviderCatalogue {
                     id: server.rowID, title: server.displayName,
                     detail: "In use with \(reachly.model.isEmpty ? "no model set" : reachly.model). Server on \(address), \(count).",
                     status: .inUse,
-                    actions: chat.count > 1 ? [.useLocalServer(server)] : [])
+                    actions: chat.count > 1 ? [.useLocalServer(server)] : [],
+                    note: reachly.hasWithheldKey ? withheldKeyNote(reachly) : nil)
             }
             return AIProviderRow(
                 id: server.rowID, title: server.displayName,
@@ -241,6 +254,9 @@ public enum AIProviderCatalogue {
     }
 
     static func claudeCodeRow(_ claudeCode: AIProviderMachineFacts.ClaudeCode, reachly: ReachlyAIState) -> AIProviderRow {
+        if !claudeCode.isConnected, let problem = reachly.bridgeLocationProblem {
+            return bridgeProblemRow(id: .claudeCode, title: "Claude Code", detail: "Found. Not connected to Reachly's MCP server.", problem: problem, note: claudeSignInNote)
+        }
         guard claudeCode.isConnected else {
             return AIProviderRow(
                 id: .claudeCode, title: "Claude Code",
@@ -261,10 +277,14 @@ public enum AIProviderCatalogue {
                     detail: "Connected to another copy of Reachly.",
                     status: .connected,
                     actions: reachly.mcpServerEnabled ? [] : [.turnOnMCPServer],
-                    note: "Its reachly entry runs \(command). Reachly never changes an existing entry; edit claude_desktop_config.json to point it at this copy.")
+                    note: "Its reachly entry runs the command below. Reachly never changes an existing entry; edit claude_desktop_config.json to point it at this copy.",
+                    quoted: command)
             }
             return connectedRow(id: .claudeDesktop, title: "Claude Desktop", client: "Claude Desktop", reachly: reachly, note: claudeSignInNote)
         case .missing, .notConnected:
+            if let problem = reachly.bridgeLocationProblem {
+                return bridgeProblemRow(id: .claudeDesktop, title: "Claude Desktop", detail: "Installed. Not connected to Reachly's MCP server.", problem: problem, note: claudeSignInNote)
+            }
             return AIProviderRow(
                 id: .claudeDesktop, title: "Claude Desktop",
                 detail: "Installed. Not connected to Reachly's MCP server.",
@@ -288,6 +308,9 @@ public enum AIProviderCatalogue {
             return connectedRow(id: .qoder, title: title, client: "Qoder", reachly: reachly, note: note)
         }
         let unreadable = qoder.config == .unreadable
+        if let problem = reachly.bridgeLocationProblem {
+            return bridgeProblemRow(id: .qoder, title: title, detail: qoder.cliPath == nil ? "Installed. Not connected to Reachly's MCP server." : "Found. Not connected to Reachly's MCP server.", problem: problem, note: note)
+        }
         if qoder.cliPath != nil {
             return AIProviderRow(
                 id: .qoder, title: title,
@@ -309,11 +332,20 @@ public enum AIProviderCatalogue {
         let hasCodex = apps.codexApp || apps.codexCLIPath != nil
         let title = hasChatGPT && hasCodex ? "ChatGPT and Codex" : (hasChatGPT ? "ChatGPT" : "Codex")
         if reachly.usesOpenAIAPI {
+            if reachly.hasUsableKey {
+                return AIProviderRow(
+                    id: .openAI, title: title,
+                    detail: "The OpenAI API is selected in Reachly and has a key for it.",
+                    status: .inUse,
+                    note: openAISignInNote)
+            }
             return AIProviderRow(
                 id: .openAI, title: title,
-                detail: reachly.hasKey ? "The OpenAI API is selected in Reachly and has a key." : "The OpenAI API is selected in Reachly. Paste a key under API key.",
-                status: reachly.hasKey ? .inUse : .needsAction,
-                actions: reachly.hasKey ? [] : [.openLink(.openAIKeys)],
+                detail: reachly.hasWithheldKey
+                    ? "The OpenAI API is selected in Reachly. " + EndpointKeyPolicy.mismatchMessage(savedOrigin: reachly.savedKeyOrigin)
+                    : "The OpenAI API is selected in Reachly. Paste a key under API key.",
+                status: .needsAction,
+                actions: [.openLink(.openAIKeys)],
                 note: openAISignInNote)
         }
         return AIProviderRow(
@@ -337,19 +369,32 @@ public enum AIProviderCatalogue {
         return AIProviderRow(id: id, title: title, detail: "Connected to Reachly's MCP server.", status: .connected, note: note)
     }
 
+    /// A client that could be connected, but not while Reachly runs from a disk image or a translocated copy.
+    private static func bridgeProblemRow(id: AIProviderRow.ID, title: String, detail: String, problem: String, note: String) -> AIProviderRow {
+        AIProviderRow(id: id, title: title, detail: detail, status: .needsAction, note: problem + " " + note)
+    }
+
+    /// For a local server selected while the endpoint's saved key belongs elsewhere: that key is not sent.
+    private static func withheldKeyNote(_ reachly: ReachlyAIState) -> String {
+        if let origin = reachly.savedKeyOrigin {
+            return "No key is sent here: the saved endpoint key is for \(origin)."
+        }
+        return "No key is sent here: the saved endpoint key isn't tied to an endpoint."
+    }
+
     // MARK: Suggestions
 
     /// What can still be set up: an Anthropic key, Caimex, an OpenAI-compatible endpoint and local models,
     /// each left out once it is in use or found.
     public static func suggestions(machine: AIProviderMachineFacts, reachly: ReachlyAIState) -> [AIProviderSuggestion] {
         var suggestions = [AIProviderSuggestion]()
-        if !(reachly.kind == .anthropic && reachly.hasKey) {
+        if !(reachly.kind == .anthropic && reachly.hasUsableKey) {
             suggestions.append(AIProviderSuggestion(
                 id: .anthropicKey, title: "Anthropic API key",
                 detail: "Chat with Claude in Reachly. Claude plan sign-ins can't be used by other apps, so this needs an API key from the Claude Console.",
                 links: [.anthropicKeys], opensSettings: true))
         }
-        if machine.caimex == nil, !(reachly.kind == .caimex && reachly.hasKey) {
+        if machine.caimex == nil, !(reachly.kind == .caimex && reachly.hasUsableKey) {
             suggestions.append(AIProviderSuggestion(
                 id: .caimexKey, title: "Caimex",
                 detail: "One key for the models on the Caimex gateway, such as DeepSeek, Qwen and GLM.",
@@ -374,45 +419,58 @@ public enum AIProviderCatalogue {
 
     // MARK: Prompts
 
-    /// What the confirmation says, in full, before the action runs. Nil for a link or a copy, which change
-    /// nothing. `home` shortens paths to `~`.
+    /// What the confirmation says, in full, before the action runs, and exactly what runs or is written when it
+    /// is confirmed: the command with the tool's path as shown, or the config file and the bridge path. Nil only
+    /// for a link or a copy, which change nothing. `home` shortens paths to `~` for display.
     public static func prompt(for action: AIProviderAction, machine: AIProviderMachineFacts, reachly: ReachlyAIState, home: String) -> AIProviderPrompt? {
         let serverNote = reachly.mcpServerEnabled ? "" : " Reachly's MCP server is turned on too, on 127.0.0.1:\(reachly.mcpPort)."
         switch action {
         case .useCaimexKey:
-            let cli = machine.caimex?.cliPath ?? "caimex"
+            guard let cli = machine.caimex?.cliPath else { return notFound("The Caimex CLI") }
+            let command = MCPConnectCommand(executable: cli, arguments: ["auth", "export"])
             return AIProviderPrompt(
                 title: "Use the Caimex CLI's key?",
                 message: "Reachly runs this command once to read the Caimex API key, saves the key in your login Keychain for Caimex, and selects Caimex as the provider. It replaces any Caimex key saved in Reachly. The rest of the command's output is discarded and nothing else is kept.",
-                detail: MCPConnectCommand(executable: cli, arguments: ["auth", "export"]).displayString(home: home),
-                confirmTitle: "Use Key")
+                detail: command.displayString(home: home),
+                confirmTitle: "Use Key",
+                command: command)
         case .useLocalServer(let server):
             return AIProviderPrompt(
                 title: "Use \(server.displayName)?",
-                message: "Reachly selects the OpenAI-compatible endpoint at \(server.baseURL) with the model you pick. Chats go to \(server.displayName) on this Mac, and no key is needed. Your other providers and their keys stay as they are.",
+                message: "Reachly selects the OpenAI-compatible endpoint at \(server.baseURL) with the model you pick. Chats go to \(server.displayName) on this Mac with no key: a key saved for another endpoint stays saved and is sent only to the endpoint it was saved for.",
                 confirmTitle: "Use \(server.displayName)")
         case .connectClaudeCode:
-            let cli = machine.claudeCode?.cliPath ?? "claude"
+            if let problem = reachly.bridgeLocationProblem { return moveFirst(problem) }
+            guard let cli = machine.claudeCode?.cliPath else { return notFound("Claude Code") }
+            let command = MCPConnectCommand.claudeCodeAdd(claude: cli, bridgePath: reachly.bridgePath)
             return AIProviderPrompt(
                 title: "Connect Claude Code to Reachly?",
                 message: "Reachly runs this command, which adds Reachly's MCP server to Claude Code for your user account. Claude Code can then use Reachly's hosts and tools, with the same guardrails, approval sheet and audit log.\(serverNote)",
-                detail: MCPConnectCommand.claudeCodeAdd(claude: cli, bridgePath: reachly.bridgePath).displayString(home: home),
-                confirmTitle: "Connect")
+                detail: command.displayString(home: home),
+                confirmTitle: "Connect",
+                command: command)
         case .connectClaudeDesktop:
-            let path = machine.claudeDesktop?.configPath ?? "~/Library/Application Support/Claude/claude_desktop_config.json"
+            if let problem = reachly.bridgeLocationProblem { return moveFirst(problem) }
+            guard let path = machine.claudeDesktop?.configPath else { return notFound("Claude Desktop") }
             return AIProviderPrompt(
                 title: "Connect Claude Desktop to Reachly?",
-                message: "Reachly adds a reachly entry under mcpServers in Claude Desktop's config. Nothing else in the file changes, and a copy of the current file is saved next to it first. Restart Claude Desktop afterwards to load Reachly.\(serverNote)",
+                message: "Reachly adds a reachly entry under mcpServers in Claude Desktop's config, running \(reachly.bridgePath). Nothing else in the file changes, and a copy of the current file is saved next to it first. Restart Claude Desktop afterwards to load Reachly.\(serverNote)",
                 detail: abbreviate(path, home: home),
-                confirmTitle: "Connect")
+                confirmTitle: "Connect",
+                configFile: path,
+                bridgePath: reachly.bridgePath)
         case .connectQoderCLI:
-            let cli = machine.qoder?.cliPath ?? "qoder"
+            if let problem = reachly.bridgeLocationProblem { return moveFirst(problem) }
+            guard let cli = machine.qoder?.cliPath else { return notFound("The Qoder CLI") }
+            let command = MCPConnectCommand.qoderAdd(qoder: cli, bridgePath: reachly.bridgePath)
             return AIProviderPrompt(
                 title: "Connect Qoder to Reachly?",
                 message: "Reachly runs this command, which adds Reachly's MCP server to Qoder for your user account, in ~/.qoder/settings.json. Qoder can then use Reachly's hosts and tools, with the same guardrails, approval sheet and audit log.\(serverNote)",
-                detail: MCPConnectCommand.qoderAdd(qoder: cli, bridgePath: reachly.bridgePath).displayString(home: home),
-                confirmTitle: "Connect")
+                detail: command.displayString(home: home),
+                confirmTitle: "Connect",
+                command: command)
         case .showQoderAppSteps:
+            if let problem = reachly.bridgeLocationProblem { return moveFirst(problem) }
             var steps = [
                 "Open Qoder, then Settings (⌘⇧,) › MCP.",
                 "Click Add and choose STDIO.",
@@ -431,7 +489,7 @@ public enum AIProviderCatalogue {
         case .setUpOpenAIEndpoint:
             return AIProviderPrompt(
                 title: "Set up the OpenAI API?",
-                message: "ChatGPT and Codex sign-ins can't be used by other apps, so Reachly uses an OpenAI API key instead. Reachly selects the OpenAI-compatible endpoint at \(openAIBaseURL). Then paste an OpenAI API key under API key and type a model ID under Model.",
+                message: "ChatGPT and Codex sign-ins can't be used by other apps, so Reachly uses an OpenAI API key instead. Reachly selects the OpenAI-compatible endpoint at \(openAIBaseURL). A saved endpoint key is sent there only if it was saved for api.openai.com; otherwise paste an OpenAI API key under API key. Then type a model ID under Model.",
                 confirmTitle: "Set Up")
         case .useEnvironmentKey(.anthropic):
             return AIProviderPrompt(
@@ -441,7 +499,7 @@ public enum AIProviderCatalogue {
         case .useEnvironmentKey(.openAI):
             return AIProviderPrompt(
                 title: "Use OPENAI_API_KEY?",
-                message: "Reachly saves the key from its environment in your login Keychain for the OpenAI-compatible endpoint, selects that endpoint and points it at \(openAIBaseURL). It replaces any endpoint key saved in Reachly. Type a model ID under Model afterwards.",
+                message: "Reachly points the OpenAI-compatible endpoint at \(openAIBaseURL), selects it, and saves the key from its environment in your login Keychain for that endpoint only: it is sent to api.openai.com and nowhere else. It replaces any endpoint key saved in Reachly. Type a model ID under Model afterwards.",
                 confirmTitle: "Use Key")
         case .turnOnMCPServer:
             return AIProviderPrompt(
@@ -451,6 +509,16 @@ public enum AIProviderCatalogue {
         case .copyClaudeDesktopSnippet, .openLink:
             return nil
         }
+    }
+
+    /// Nothing to confirm: the tool went away since the last check.
+    private static func notFound(_ name: String) -> AIProviderPrompt {
+        AIProviderPrompt(title: "\(name) is no longer found", message: "Click Check Again to look for it once more. Nothing was changed.", confirmTitle: nil)
+    }
+
+    /// Nothing to confirm: the bridge path would not last in another app's config.
+    private static func moveFirst(_ problem: String) -> AIProviderPrompt {
+        AIProviderPrompt(title: "Move Reachly to Applications first", message: problem, confirmTitle: nil)
     }
 
     static func abbreviate(_ path: String, home: String) -> String {

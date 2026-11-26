@@ -7,8 +7,8 @@ struct AIProviderCatalogueTests {
     private let home = "/Users/me"
     private let bridge = "/Applications/Reachly.app/Contents/MacOS/reachly-mcp"
 
-    private func reachly(_ kind: LLMProviderConfiguration.Kind = .anthropic, hasKey: Bool = false, baseURL: String = "", model: String = "", mcp: Bool = true) -> ReachlyAIState {
-        ReachlyAIState(kind: kind, hasKey: hasKey, baseURL: baseURL, model: model, bridgePath: bridge, mcpServerEnabled: mcp, mcpPort: 7317)
+    private func reachly(_ kind: LLMProviderConfiguration.Kind = .anthropic, hasKey: Bool = false, keyFor: String? = nil, baseURL: String = "", model: String = "", mcp: Bool = true, bridgePath: String? = nil) -> ReachlyAIState {
+        ReachlyAIState(kind: kind, hasKey: hasKey, savedKeyOrigin: keyFor.flatMap(EndpointOrigin.init(baseURL:)), baseURL: baseURL, model: model, bridgePath: bridgePath ?? bridge, mcpServerEnabled: mcp, mcpPort: 7317)
     }
 
     private func row(_ id: AIProviderRow.ID, _ machine: AIProviderMachineFacts, _ state: ReachlyAIState? = nil) throws -> AIProviderRow {
@@ -197,7 +197,14 @@ struct AIProviderCatalogueTests {
         let other = try row(.claudeDesktop, machine)
         #expect(other.detail.contains("another copy"))
         #expect(other.actions.isEmpty)
-        #expect(other.note?.contains("/Users/me/Old/Reachly.app") == true)
+        // The command comes from another app's file: shown verbatim on its own, never inside the note.
+        #expect(other.quoted == "/Users/me/Old/Reachly.app/Contents/MacOS/reachly-mcp")
+        #expect(other.note?.contains("/Users/me/Old") == false)
+
+        machine.claudeDesktop?.config = .connected(command: "[click](https://example.com)")
+        let linky = try row(.claudeDesktop, machine)
+        #expect(linky.quoted == "[click](https://example.com)")
+        #expect(linky.note?.contains("example.com") == false)
 
         machine.claudeDesktop?.config = .unreadable
         let unreadable = try row(.claudeDesktop, machine)
@@ -253,12 +260,36 @@ struct AIProviderCatalogueTests {
     }
 
     @Test func openAIAPIInUse() throws {
-        let withKey = try row(.openAI, thisMac, reachly(.openAICompatible, hasKey: true, baseURL: "https://api.openai.com/v1"))
+        let withKey = try row(.openAI, thisMac, reachly(.openAICompatible, hasKey: true, keyFor: "https://api.openai.com/v1", baseURL: "https://api.openai.com/v1"))
         #expect(withKey.status == .inUse)
         #expect(withKey.actions.isEmpty)
+        #expect(withKey.detail.contains("has a key for it"))
         let withoutKey = try row(.openAI, thisMac, reachly(.openAICompatible, hasKey: false, baseURL: "https://api.openai.com/v1"))
         #expect(withoutKey.status == .needsAction)
         #expect(withoutKey.actions == [.openLink(.openAIKeys)])
+    }
+
+    @Test func openAIAPIWithAKeySavedForAnotherEndpoint() throws {
+        let other = try row(.openAI, thisMac, reachly(.openAICompatible, hasKey: true, keyFor: "https://openrouter.ai/api/v1", baseURL: "https://api.openai.com/v1"))
+        #expect(other.status == .needsAction)
+        #expect(other.detail.contains("The saved key was for https://openrouter.ai; enter a key for this endpoint."))
+        #expect(!other.detail.contains("has a key"))
+        #expect(other.actions == [.openLink(.openAIKeys)])
+
+        // A key saved before origins existed and never tied to an endpoint is not sent either.
+        let untied = try row(.openAI, thisMac, reachly(.openAICompatible, hasKey: true, baseURL: "https://api.openai.com/v1"))
+        #expect(untied.status == .needsAction)
+    }
+
+    @Test func aLocalServerSaysTheEndpointKeyIsNotSent() throws {
+        var machine = thisMac
+        machine.lmStudio = .init(installed: true, state: .running(models: ["qwen3-8b"]))
+        let withheld = try row(.lmStudio, machine, reachly(.openAICompatible, hasKey: true, keyFor: "https://openrouter.ai/api/v1", baseURL: "http://127.0.0.1:1234/v1", model: "qwen3-8b"))
+        #expect(withheld.status == .inUse)
+        #expect(withheld.note == "No key is sent here: the saved endpoint key is for https://openrouter.ai.")
+
+        let own = try row(.lmStudio, machine, reachly(.openAICompatible, hasKey: true, keyFor: "http://127.0.0.1:1234/v1", baseURL: "http://127.0.0.1:1234/v1", model: "qwen3-8b"))
+        #expect(own.note == nil)
     }
 
     // MARK: Environment keys
@@ -316,8 +347,10 @@ struct AIProviderCatalogueTests {
             .useCaimexKey, .useLocalServer(.lmStudio), .useLocalServer(.ollama), .connectClaudeCode, .connectClaudeDesktop,
             .connectQoderCLI, .setUpOpenAIEndpoint, .useEnvironmentKey(.anthropic), .useEnvironmentKey(.openAI), .turnOnMCPServer,
         ]
+        var machine = thisMac
+        machine.qoder = .init(appInstalled: true, cliPath: "/usr/local/bin/qoder", config: .notConnected)
         for action in changing {
-            let shown = prompt(action)
+            let shown = AIProviderCatalogue.prompt(for: action, machine: machine, reachly: reachly(), home: home)
             #expect(shown?.confirmTitle != nil, "\(action) must be confirmed")
             #expect(shown?.message.isEmpty == false)
         }
@@ -339,6 +372,64 @@ struct AIProviderCatalogueTests {
         machine.qoder = .init(appInstalled: true, cliPath: "/usr/local/bin/qoder", config: .notConnected)
         let qoder = try #require(AIProviderCatalogue.prompt(for: .connectQoderCLI, machine: machine, reachly: reachly(), home: home))
         #expect(qoder.detail == "/usr/local/bin/qoder mcp add -s user reachly -- /Applications/Reachly.app/Contents/MacOS/reachly-mcp")
+    }
+
+    @Test func aConfirmedPromptCarriesExactlyWhatRuns() throws {
+        // The detector runs the prompt's command and writes the prompt's file, never a path re-read after the click.
+        let caimex = try #require(prompt(.useCaimexKey))
+        #expect(caimex.command == MCPConnectCommand(executable: "/Users/me/.local/bin/caimex", arguments: ["auth", "export"]))
+        let claude = try #require(prompt(.connectClaudeCode))
+        #expect(claude.command == .claudeCodeAdd(claude: "/Users/me/.local/bin/claude", bridgePath: bridge))
+        #expect(claude.command?.displayString(home: home) == claude.detail)
+        let desktop = try #require(prompt(.connectClaudeDesktop))
+        #expect(desktop.configFile == "/Users/me/Library/Application Support/Claude/claude_desktop_config.json")
+        #expect(desktop.bridgePath == bridge)
+        #expect(desktop.message.contains(bridge))
+    }
+
+    @Test func aToolGoneSinceTheCheckHasNothingToConfirm() throws {
+        let machine = AIProviderMachineFacts()
+        for action: AIProviderAction in [.useCaimexKey, .connectClaudeCode, .connectClaudeDesktop, .connectQoderCLI] {
+            let shown = try #require(AIProviderCatalogue.prompt(for: action, machine: machine, reachly: reachly(), home: home))
+            #expect(shown.confirmTitle == nil, "\(action)")
+            #expect(shown.command == nil && shown.configFile == nil)
+        }
+    }
+
+    @Test func connectingFromADiskImageOrATranslocatedCopyIsRefused() throws {
+        var machine = thisMac
+        machine.qoder = .init(appInstalled: true, cliPath: "/usr/local/bin/qoder", config: .notConnected)
+        for path in [
+            "/Volumes/Reachly/Reachly.app/Contents/MacOS/reachly-mcp",
+            "/private/var/folders/xy/T/AppTranslocation/1234-ABCD/d/Reachly.app/Contents/MacOS/reachly-mcp",
+        ] {
+            let state = reachly(bridgePath: path)
+            for action: AIProviderAction in [.connectClaudeCode, .connectClaudeDesktop, .connectQoderCLI, .showQoderAppSteps] {
+                let shown = try #require(AIProviderCatalogue.prompt(for: action, machine: machine, reachly: state, home: home))
+                #expect(shown.confirmTitle == nil, "\(action)")
+                #expect(shown.command == nil && shown.configFile == nil && shown.bridgePath == nil)
+                #expect(shown.message.contains("Move Reachly to Applications first."))
+            }
+            for id: AIProviderRow.ID in [.claudeCode, .claudeDesktop, .qoder] {
+                let shown = try row(id, machine, state)
+                #expect(shown.actions.isEmpty, "\(id)")
+                #expect(shown.note?.contains("Move Reachly to Applications first.") == true)
+            }
+        }
+        // Installed in Applications: nothing to refuse.
+        #expect(try row(.claudeCode, machine).actions == [.connectClaudeCode])
+        #expect(MCPBridgeLocation.problem(bridgePath: bridge) == nil)
+        #expect(MCPBridgeLocation.problem(bridgePath: "/Users/me/Applications/Reachly.app/Contents/MacOS/reachly-mcp") == nil)
+    }
+
+    @Test func localServerAndOpenAIPromptsSayWhereTheKeyGoes() throws {
+        let local = try #require(prompt(.useLocalServer(.lmStudio)))
+        #expect(!local.message.contains("no key is needed"))
+        #expect(local.message.contains("sent only to the endpoint it was saved for"))
+        let openAI = try #require(prompt(.setUpOpenAIEndpoint))
+        #expect(openAI.message.contains("only if it was saved for api.openai.com"))
+        let environment = try #require(prompt(.useEnvironmentKey(.openAI)))
+        #expect(environment.message.contains("sent to api.openai.com and nowhere else"))
     }
 
     @Test func connectPromptsSayTheServerTurnsOn() throws {

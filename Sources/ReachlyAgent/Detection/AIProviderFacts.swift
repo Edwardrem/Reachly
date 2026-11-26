@@ -130,15 +130,18 @@ public struct ReachlyAIState: Sendable, Equatable {
     public var kind: LLMProviderConfiguration.Kind
     /// Whether the selected kind has a saved key (only the Keychain item's existence; never the key).
     public var hasKey: Bool
+    /// For an endpoint, the origin its saved key belongs to; the key is sent only there.
+    public var savedKeyOrigin: EndpointOrigin?
     public var baseURL: String
     public var model: String
     public var bridgePath: String
     public var mcpServerEnabled: Bool
     public var mcpPort: Int
 
-    public init(kind: LLMProviderConfiguration.Kind, hasKey: Bool, baseURL: String = "", model: String = "", bridgePath: String, mcpServerEnabled: Bool, mcpPort: Int = MCPBridgeConfig.defaultPort) {
+    public init(kind: LLMProviderConfiguration.Kind, hasKey: Bool, savedKeyOrigin: EndpointOrigin? = nil, baseURL: String = "", model: String = "", bridgePath: String, mcpServerEnabled: Bool, mcpPort: Int = MCPBridgeConfig.defaultPort) {
         self.kind = kind
         self.hasKey = hasKey
+        self.savedKeyOrigin = savedKeyOrigin
         self.baseURL = baseURL
         self.model = model
         self.bridgePath = bridgePath
@@ -146,8 +149,22 @@ public struct ReachlyAIState: Sendable, Equatable {
         self.mcpPort = mcpPort
     }
 
-    public init(configuration: LLMProviderConfiguration, hasKey: Bool, bridgePath: String, mcpServerEnabled: Bool, mcpPort: Int) {
-        self.init(kind: configuration.kind, hasKey: hasKey, baseURL: configuration.baseURL, model: configuration.model, bridgePath: bridgePath, mcpServerEnabled: mcpServerEnabled, mcpPort: mcpPort)
+    public init(configuration: LLMProviderConfiguration, hasKey: Bool, savedKeyOrigin: EndpointOrigin?, bridgePath: String, mcpServerEnabled: Bool, mcpPort: Int) {
+        self.init(kind: configuration.kind, hasKey: hasKey, savedKeyOrigin: savedKeyOrigin, baseURL: configuration.baseURL, model: configuration.model, bridgePath: bridgePath, mcpServerEnabled: mcpServerEnabled, mcpPort: mcpPort)
+    }
+
+    /// A key is saved and will be sent: Anthropic and Caimex always, an endpoint only at the origin it was saved for.
+    public var hasUsableKey: Bool {
+        hasKey && EndpointKeyPolicy.mayUseKey(kind: kind, savedOrigin: savedKeyOrigin, baseURL: baseURL)
+    }
+
+    /// A key is saved for the selected endpoint but withheld from its current base URL.
+    public var hasWithheldKey: Bool { hasKey && !hasUsableKey }
+
+    /// Where Reachly's stdio bridge would be written into other apps' configs, when that place is temporary:
+    /// a disk image or a translocated copy disappears, and the client could then not start Reachly.
+    public var bridgeLocationProblem: String? {
+        MCPBridgeLocation.problem(bridgePath: bridgePath)
     }
 
     /// The OpenAI-compatible endpoint is selected and points at this local server.

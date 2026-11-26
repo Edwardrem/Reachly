@@ -1,8 +1,12 @@
+import Darwin
 import Foundation
 import Synchronization
 
 /// Runs a command-line tool with a deadline and keeps what it prints in memory, never on disk or in a log.
 /// A tool that cannot start, hangs or prints too much never blocks the caller for longer than the timeout.
+///
+/// The tool starts in a process group of its own, with only standard input (`/dev/null`), output and error
+/// open, so a timeout stops it and every helper it started, and nothing of the app's leaks into it.
 public enum CommandRunner {
     public struct Output: Sendable {
         public var exitStatus: Int32
@@ -18,7 +22,7 @@ public enum CommandRunner {
     /// pipe keeps it open; the run then ends with what was read.
     static let drainGrace: TimeInterval = 0.5
 
-    /// Nil when the tool could not be started.
+    /// Nil when the tool could not be started. `environment` nil passes the app's own environment.
     public static func run(
         _ executable: String,
         arguments: [String],
@@ -28,20 +32,30 @@ public enum CommandRunner {
         currentDirectory: URL? = nil,
         outputLimit: Int = 1024 * 1024
     ) async -> Output? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        if let environment { process.environment = environment }
-        if let currentDirectory { process.currentDirectoryURL = currentDirectory }
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = includeStandardError ? pipe : FileHandle.nullDevice
-        process.standardInput = FileHandle.nullDevice
+        var pipeEnds: [Int32] = [-1, -1]
+        guard pipe(&pipeEnds) == 0 else { return nil }
+        let (readEnd, writeEnd) = (pipeEnds[0], pipeEnds[1])
+        // Neither end may leak into a tool another thread starts meanwhile; the child gets its copy by dup2.
+        _ = fcntl(readEnd, F_SETFD, FD_CLOEXEC)
+        _ = fcntl(writeEnd, F_SETFD, FD_CLOEXEC)
 
-        let run = Run(limit: outputLimit, reader: pipe.fileHandleForReading)
-        let output = await withCheckedContinuation { continuation in
+        let pid = spawn(
+            executable, arguments: arguments,
+            environment: environment ?? ProcessInfo.processInfo.environment,
+            currentDirectory: currentDirectory,
+            output: writeEnd, includeStandardError: includeStandardError)
+        // The parent's copy of the write end must close, or the end of output never comes.
+        close(writeEnd)
+        guard let pid else {
+            close(readEnd)
+            return nil
+        }
+
+        let reader = FileHandle(fileDescriptor: readEnd, closeOnDealloc: true)
+        let run = Run(limit: outputLimit, reader: reader)
+        return await withCheckedContinuation { continuation in
             run.setContinuation(continuation)
-            pipe.fileHandleForReading.readabilityHandler = { handle in
+            reader.readabilityHandler = { handle in
                 let chunk = handle.availableData
                 if chunk.isEmpty {
                     run.reachedEndOfOutput()
@@ -49,35 +63,92 @@ public enum CommandRunner {
                     run.append(chunk)
                 }
             }
-            process.terminationHandler = { finished in
-                run.exited(status: finished.terminationStatus)
+            // Reaps the tool on a thread of its own; `waitid` and `waitpid` block until it exits.
+            Thread.detachNewThread {
+                // Wait for the exit without reaping: while the tool is a zombie its pid, and so its group id,
+                // cannot be reused, so a group kill after a timeout reaches only what the tool left behind,
+                // such as a helper that ignored SIGTERM.
+                var info = siginfo_t()
+                var waited: Int32
+                repeat { waited = waitid(P_PID, id_t(pid), &info, WEXITED | WNOWAIT) } while waited == -1 && errno == EINTR
+                if waited == 0, run.hasTimedOut { kill(-pid, SIGKILL) }
+                var status: Int32 = 0
+                var result: pid_t
+                repeat { result = waitpid(pid, &status, 0) } while result == -1 && errno == EINTR
+                run.exited(status: result == pid ? Self.exitCode(status) : -1)
                 DispatchQueue.global().asyncAfter(deadline: .now() + drainGrace) {
                     run.reachedEndOfOutput()
                 }
             }
-            do {
-                try process.run()
-            } catch {
-                run.failedToStart()
-                return
-            }
-            // Process closes its own copy of the pipe's write end once the tool is launched, so the end of
-            // output arrives when the tool (and anything it left holding the pipe) is gone.
-            let pid = process.processIdentifier
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
                 guard run.markTimedOutIfRunning() else { return }
-                kill(pid, SIGTERM)
+                // The tool leads its own group, so a negative pid reaches it and everything it started.
+                kill(-pid, SIGTERM)
                 DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
-                    if run.isRunning { kill(pid, SIGKILL) }
+                    if run.isRunning { kill(-pid, SIGKILL) }
                 }
             }
         }
-        // The Process must outlive the run: it delivers the termination handler.
-        withExtendedLifetime(process) {}
-        return output
     }
 
-    /// The state one run shares between the pipe reader, the termination handler and the timeout.
+    /// Starts the tool in a new process group (its pid is the group id) with stdin on `/dev/null`, stdout on
+    /// `output`, stderr on `output` or `/dev/null`, every other descriptor closed and default signal handling.
+    private static func spawn(
+        _ executable: String,
+        arguments: [String],
+        environment: [String: String],
+        currentDirectory: URL?,
+        output: Int32,
+        includeStandardError: Bool
+    ) -> pid_t? {
+        var actions = posix_spawn_file_actions_t(bitPattern: 0)
+        guard posix_spawn_file_actions_init(&actions) == 0 else { return nil }
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0)
+        posix_spawn_file_actions_adddup2(&actions, output, STDOUT_FILENO)
+        if includeStandardError {
+            posix_spawn_file_actions_adddup2(&actions, output, STDERR_FILENO)
+        } else {
+            posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0)
+        }
+        if let currentDirectory {
+            guard posix_spawn_file_actions_addchdir_np(&actions, currentDirectory.path) == 0 else { return nil }
+        }
+
+        var attributes = posix_spawnattr_t(bitPattern: 0)
+        guard posix_spawnattr_init(&attributes) == 0 else { return nil }
+        defer { posix_spawnattr_destroy(&attributes) }
+        // A group of its own (0: the child's pid), only the descriptors set up above, and signals as a new
+        // process expects them, whatever the app blocks or ignores.
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF))
+        posix_spawnattr_setpgroup(&attributes, 0)
+        var noSignals = sigset_t()
+        sigemptyset(&noSignals)
+        posix_spawnattr_setsigmask(&attributes, &noSignals)
+        var allSignals = sigset_t()
+        sigfillset(&allSignals)
+        sigdelset(&allSignals, SIGKILL)
+        sigdelset(&allSignals, SIGSTOP)
+        posix_spawnattr_setsigdefault(&attributes, &allSignals)
+
+        let argv = ([executable] + arguments).map { strdup($0) } + [nil]
+        let envp = environment.map { strdup("\($0.key)=\($0.value)") } + [nil]
+        defer {
+            for pointer in argv { free(pointer) }
+            for pointer in envp { free(pointer) }
+        }
+        var pid: pid_t = 0
+        let result = posix_spawn(&pid, executable, &actions, &attributes, argv, envp)
+        return result == 0 ? pid : nil
+    }
+
+    /// The exit code, or 128 + the signal for a tool a signal ended, as a shell reports it.
+    private static func exitCode(_ status: Int32) -> Int32 {
+        let signal = status & 0x7F
+        return signal == 0 ? (status >> 8) & 0xFF : 128 + signal
+    }
+
+    /// The state one run shares between the pipe reader, the reaper and the timeout.
     private final class Run: Sendable {
         private struct State {
             var data = Data()
@@ -97,7 +168,10 @@ public enum CommandRunner {
             self.reader = reader
         }
 
-        var isRunning: Bool { state.withLock { $0.exitStatus == nil && $0.continuation != nil } }
+        /// The tool has not been reaped yet, so its pid and group still belong to it.
+        var isRunning: Bool { state.withLock { $0.exitStatus == nil } }
+
+        var hasTimedOut: Bool { state.withLock { $0.timedOut } }
 
         func setContinuation(_ continuation: CheckedContinuation<Output?, Never>) {
             state.withLock { $0.continuation = continuation }
@@ -134,19 +208,10 @@ public enum CommandRunner {
         /// True when the tool was still running, so the caller should stop it.
         func markTimedOutIfRunning() -> Bool {
             state.withLock { state in
-                guard state.exitStatus == nil, state.continuation != nil else { return false }
+                guard state.exitStatus == nil else { return false }
                 state.timedOut = true
                 return true
             }
-        }
-
-        func failedToStart() {
-            let continuation = state.withLock { state -> CheckedContinuation<Output?, Never>? in
-                defer { state.continuation = nil }
-                return state.continuation
-            }
-            reader.readabilityHandler = nil
-            continuation?.resume(returning: nil)
         }
 
         /// Hands the output over once the tool has exited and its output ended. The buffer moves out, so the

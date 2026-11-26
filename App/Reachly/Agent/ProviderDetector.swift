@@ -42,7 +42,7 @@ final class ProviderDetector {
     /// Reachly's side of the rows, read live so a switch made anywhere shows at once.
     func reachlyState(mcp: MCPServerController) -> ReachlyAIState {
         let settings = AgentSettings.shared
-        return ReachlyAIState(configuration: settings.configuration, hasKey: settings.hasAPIKey, bridgePath: mcp.bridgePath, mcpServerEnabled: mcp.isEnabled, mcpPort: mcp.port)
+        return ReachlyAIState(configuration: settings.configuration, hasKey: settings.hasAPIKey, savedKeyOrigin: settings.savedKeyOrigin, bridgePath: mcp.bridgePath, mcpServerEnabled: mcp.isEnabled, mcpPort: mcp.port)
     }
 
     // MARK: Detection
@@ -150,11 +150,12 @@ final class ProviderDetector {
 
     // MARK: Actions
 
-    /// Runs a confirmed action. `model` is the one picked for a local server.
-    func perform(_ action: AIProviderAction, row: AIProviderRow.ID, model: String?, mcp: MCPServerController) async {
+    /// Runs a confirmed action. `prompt` is the confirmation the user saw: a command or file write runs exactly
+    /// as it showed, never re-read from a later check. `model` is the one picked for a local server.
+    func perform(_ action: AIProviderAction, prompt: AIProviderPrompt?, row: AIProviderRow.ID, model: String?, mcp: MCPServerController) async {
         guard runningAction == nil else { return }
         runningAction = row
-        let result = await run(action, model: model, mcp: mcp)
+        let result = await run(action, prompt: prompt, model: model, mcp: mcp)
         runningAction = nil
         if let result { results[row] = result }
         switch action {
@@ -165,25 +166,29 @@ final class ProviderDetector {
         }
     }
 
-    private func run(_ action: AIProviderAction, model: String?, mcp: MCPServerController) async -> ActionResult? {
+    private func run(_ action: AIProviderAction, prompt: AIProviderPrompt?, model: String?, mcp: MCPServerController) async -> ActionResult? {
         let settings = AgentSettings.shared
         switch action {
         case .useCaimexKey:
-            return await useCaimexKey(settings: settings)
+            guard let command = prompt?.command else { return .failed("The Caimex CLI is no longer found. Nothing was changed.") }
+            return await useCaimexKey(command, settings: settings)
         case .useLocalServer(let server):
             return useLocalServer(server, model: model, settings: settings)
         case .connectClaudeCode:
-            guard let cli = machine?.claudeCode?.cliPath else { return .failed("Claude Code is no longer found. Nothing was changed.") }
+            guard let command = prompt?.command else { return .failed("Claude Code is no longer found. Nothing was changed.") }
             return await connect(
-                MCPConnectCommand.claudeCodeAdd(claude: cli, bridgePath: mcp.bridgePath), client: "Claude Code", mcp: mcp,
+                command, client: "Claude Code", mcp: mcp,
                 success: "Claude Code is connected. Start a new Claude Code session to use Reachly's tools.")
         case .connectQoderCLI:
-            guard let cli = machine?.qoder?.cliPath else { return .failed("The Qoder CLI is no longer found. Nothing was changed.") }
+            guard let command = prompt?.command else { return .failed("The Qoder CLI is no longer found. Nothing was changed.") }
             return await connect(
-                MCPConnectCommand.qoderAdd(qoder: cli, bridgePath: mcp.bridgePath), client: "Qoder", mcp: mcp,
+                command, client: "Qoder", mcp: mcp,
                 success: "Qoder is connected. Restart Qoder, or run /mcp reload in a Qoder CLI session, to load Reachly.")
         case .connectClaudeDesktop:
-            return await connectClaudeDesktop(mcp: mcp)
+            guard let path = prompt?.configFile, let bridge = prompt?.bridgePath else {
+                return .failed("Claude Desktop is no longer found. Nothing was changed.")
+            }
+            return await connectClaudeDesktop(file: MCPClientConfigFile(url: URL(fileURLWithPath: path)), bridge: bridge, mcp: mcp)
         case .copyClaudeDesktopSnippet:
             copy(mcp.claudeDesktopSnippet)
             return .done("Copied. Paste it into claude_desktop_config.json, then restart Claude Desktop.")
@@ -195,6 +200,9 @@ final class ProviderDetector {
             next.kind = .openAICompatible
             next.baseURL = AIProviderCatalogue.openAIBaseURL
             settings.configuration = next
+            if settings.hasUsableAPIKey {
+                return .done("The OpenAI API is selected, with the key saved for it. Type a model ID under Model.")
+            }
             return .done("The OpenAI API is selected. Paste an OpenAI API key under API key, then type a model ID under Model.")
         case .useEnvironmentKey(let key):
             return useEnvironmentKey(key, settings: settings)
@@ -204,9 +212,8 @@ final class ProviderDetector {
     }
 
     /// Runs `caimex auth export` only now, keeps the Caimex key and drops the rest of the output at once.
-    private func useCaimexKey(settings: AgentSettings) async -> ActionResult {
-        guard let cli = machine?.caimex?.cliPath else { return .failed("The Caimex CLI is no longer found. Nothing was changed.") }
-        guard var output = await CommandRunner.run(cli, arguments: ["auth", "export"], timeout: 15, environment: Self.toolEnvironment(for: cli, home: home), currentDirectory: home, outputLimit: 256 * 1024) else {
+    private func useCaimexKey(_ command: MCPConnectCommand, settings: AgentSettings) async -> ActionResult {
+        guard var output = await CommandRunner.run(command.executable, arguments: command.arguments, timeout: 15, environment: Self.toolEnvironment(for: command.executable, home: home), currentDirectory: home, outputLimit: 256 * 1024) else {
             return .failed("The Caimex CLI couldn't be started. Nothing was changed.")
         }
         let exported = output.succeeded ? CaimexExportedKey.parse(output.data) : nil
@@ -243,8 +250,10 @@ final class ProviderDetector {
         next.model = model
         settings.configuration = next
         var message = "Reachly now uses \(server.displayName) with \(model)."
-        if settings.hasAPIKey {
-            message += " The key saved for the endpoint is sent to it too; remove it under API key if \(server.displayName) doesn't need one."
+        if settings.hasUsableAPIKey {
+            message += " The key saved for this endpoint is sent to it; remove it under API key if \(server.displayName) doesn't need one."
+        } else if settings.hasAPIKey {
+            message += " No key is sent to it; the saved endpoint key stays saved for its own endpoint."
         }
         return .done(message)
     }
@@ -290,9 +299,7 @@ final class ProviderDetector {
         return .done(success)
     }
 
-    private func connectClaudeDesktop(mcp: MCPServerController) async -> ActionResult {
-        let file = MCPClientConfigFile.claudeDesktop(home: home)
-        let bridge = mcp.bridgePath
+    private func connectClaudeDesktop(file: MCPClientConfigFile, bridge: String, mcp: MCPServerController) async -> ActionResult {
         let outcome: MCPClientConfigFile.Outcome
         do {
             outcome = try await Task.detached(priority: .userInitiated) { try file.connect(command: bridge) }.value

@@ -12,7 +12,7 @@ struct AIProvidersFoundSection: View {
         Section {
             AIProviderRowsList()
             HStack(spacing: 8) {
-                Text("Nothing is read, copied or changed until you click a button.")
+                Text("Nothing is copied or changed until you click a button.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -103,10 +103,18 @@ struct AIProviderRowView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if let note = row.note {
-                    Text(Self.inlineMarkdown(note))
+                    Text(Self.codeSpans(note))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+                if let quoted = row.quoted {
+                    // Read from another app's file: shown exactly as written, never as Markdown or a link.
+                    Text(verbatim: quoted)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
                 }
                 let links = row.actions.filter(\.isLink)
                 if !links.isEmpty {
@@ -138,13 +146,14 @@ struct AIProviderRowView: View {
             }
         }
         .padding(.vertical, 2)
-        .accessibilityElement(children: .contain)        .sheet(item: $pending) { pending in
+        .accessibilityElement(children: .contain)
+        .sheet(item: $pending) { pending in
             AIProviderActionSheet(
                 prompt: pending.prompt,
                 models: pending.models,
                 initialModel: reachly.model
             ) { model in
-                Task { await detector.perform(pending.action, row: row.id, model: model, mcp: mcp) }
+                Task { await detector.perform(pending.action, prompt: pending.prompt, row: row.id, model: model, mcp: mcp) }
             }
             .themedSheet()
         }
@@ -157,7 +166,7 @@ struct AIProviderRowView: View {
         }
         guard let prompt = AIProviderCatalogue.prompt(for: action, machine: machine, reachly: reachly, home: detector.home.path) else {
             // A copy changes nothing, so it needs no confirmation.
-            Task { await detector.perform(action, row: row.id, model: nil, mcp: mcp) }
+            Task { await detector.perform(action, prompt: nil, row: row.id, model: nil, mcp: mcp) }
             return
         }
         pending = PendingAction(action: action, prompt: prompt, models: models(for: action))
@@ -195,9 +204,16 @@ struct AIProviderRowView: View {
         }
     }
 
-    /// Notes mark commands with backticks; show them as code, everything else as typed.
-    static func inlineMarkdown(_ text: String) -> AttributedString {
-        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
+    /// Notes mark commands with backticks; those show as code and everything else exactly as written. No other
+    /// syntax is read, so no text can turn into a link.
+    static func codeSpans(_ text: String) -> AttributedString {
+        var result = AttributedString()
+        for (index, part) in text.split(separator: "`", omittingEmptySubsequences: false).enumerated() {
+            var piece = AttributedString(String(part))
+            if !index.isMultiple(of: 2) { piece.font = .caption.monospaced() }
+            result += piece
+        }
+        return result
     }
 }
 

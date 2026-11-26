@@ -236,6 +236,47 @@ struct CommandRunnerTests {
         #expect(Date().timeIntervalSince(started) < 5)
     }
 
+    @Test func aTimeoutStopsEverythingTheToolStarted() async throws {
+        // The shell starts a helper, prints its pid and waits: a timeout must stop the helper too.
+        let output = try #require(await CommandRunner.run("/bin/sh", arguments: ["-c", "sleep 30 & echo $!; wait"], timeout: 0.5))
+        #expect(output.timedOut)
+        let helper = try #require(Int32(String(decoding: output.data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)))
+        var gone = false
+        for _ in 0..<40 {
+            if kill(helper, 0) == -1, errno == ESRCH { gone = true; break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        if !gone { kill(helper, SIGKILL) }
+        #expect(gone, "the helper outlived the timeout")
+    }
+
+    @Test func aHelperThatIgnoresSIGTERMIsKilledToo() async throws {
+        // The helper ignores SIGTERM; the shell exits on it. The helper must still not outlive the run.
+        let output = try #require(await CommandRunner.run("/bin/sh", arguments: ["-c", "(trap '' TERM; exec sleep 30) & echo $!; wait"], timeout: 0.5))
+        #expect(output.timedOut)
+        let helper = try #require(Int32(String(decoding: output.data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)))
+        var gone = false
+        for _ in 0..<60 {
+            if kill(helper, 0) == -1, errno == ESRCH { gone = true; break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        if !gone { kill(helper, SIGKILL) }
+        #expect(gone, "a helper that ignored SIGTERM outlived the timeout")
+    }
+
+    @Test func theToolLeadsItsOwnProcessGroup() async throws {
+        let output = try #require(await CommandRunner.run("/bin/sh", arguments: ["-c", "if kill -0 -- -$$ 2>/dev/null; then echo leader; else echo member; fi"], timeout: 10))
+        #expect(String(decoding: output.data, as: UTF8.self) == "leader\n")
+    }
+
+    @Test func theToolReadsNothingFromStandardInput() async throws {
+        let started = Date()
+        let output = try #require(await CommandRunner.run("/bin/cat", arguments: [], timeout: 10))
+        #expect(output.succeeded)
+        #expect(output.data.isEmpty)
+        #expect(Date().timeIntervalSince(started) < 5)
+    }
+
     @Test func aBackgroundChildHoldingThePipeDoesNotBlock() async throws {
         let started = Date()
         let output = try #require(await CommandRunner.run("/bin/sh", arguments: ["-c", "sleep 20 & echo done"], timeout: 10))

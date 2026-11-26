@@ -1,7 +1,21 @@
 import Foundation
 
-/// A command-line call that connects an MCP client to Reachly's stdio bridge, or asks whether it is connected.
-/// Always an executable and an argument array for `Process`, never a shell string.
+/// Whether the bridge's path can go into another app's config. A path on a disk image or in a translocated
+/// copy stops existing, and the client could then no longer start Reachly.
+public enum MCPBridgeLocation {
+    public static func problem(bridgePath: String) -> String? {
+        if bridgePath.contains("/AppTranslocation/") {
+            return "macOS is running Reachly from a temporary copy, so other apps couldn't start it later. Move Reachly to Applications first."
+        }
+        if bridgePath.hasPrefix("/Volumes/") {
+            return "Reachly is running from a disk image, so other apps couldn't start it once the image is ejected. Move Reachly to Applications first."
+        }
+        return nil
+    }
+}
+
+/// A command-line call Reachly runs for a provider: an MCP client's `mcp add` or `mcp get`, or the Caimex CLI's
+/// export. Always an executable and an argument array, never a shell string.
 public struct MCPConnectCommand: Sendable, Equatable {
     public let executable: String
     public let arguments: [String]
