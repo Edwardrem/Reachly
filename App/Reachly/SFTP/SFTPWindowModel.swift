@@ -36,6 +36,15 @@ final class SFTPWindowModel {
                 }
             }
         }
+        openWith.onUploaded = { [weak self] hostID, remotePath in
+            self?.refreshPanes(on: .remote(hostID: hostID), showing: [SFTP.parent(remotePath)])
+        }
+        for pane in [left, right] {
+            let paneID = pane.id
+            pane.onFoldersChanged = { [weak self] source, folders in
+                self?.refreshPanes(on: source, showing: folders, except: paneID)
+            }
+        }
     }
 
     func pane(_ side: Side) -> PaneModel { side == .left ? left : right }
@@ -53,6 +62,13 @@ final class SFTPWindowModel {
 
     func showLocal(in side: Side) {
         pane(side).switchBackend(LocalBackend())
+    }
+
+    /// Refreshes the panes on `source` that show one of `folders`.
+    private func refreshPanes(on source: PaneSource, showing folders: Set<String>, except excluded: UUID? = nil) {
+        for pane in [left, right] where pane.id != excluded && pane.source == source && folders.contains(pane.path) {
+            Task { await pane.refresh() }
+        }
     }
 
     // MARK: Transfers
@@ -206,6 +222,8 @@ final class SFTPWindowModel {
     }
 
     func stop() {
+        left.stop()
+        right.stop()
         queue.pauseAll()
         openWith.stopAll()
         connections.closeAll()
