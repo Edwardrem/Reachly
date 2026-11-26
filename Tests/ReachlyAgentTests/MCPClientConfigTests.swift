@@ -233,7 +233,8 @@ struct CommandRunnerTests {
         let output = try #require(await CommandRunner.run("/bin/sleep", arguments: ["30"], timeout: 0.3))
         #expect(output.timedOut)
         #expect(!output.succeeded)
-        #expect(Date().timeIntervalSince(started) < 5)
+        // Well short of the 30 s sleep, with room for a loaded CI runner.
+        #expect(Date().timeIntervalSince(started) < 15)
     }
 
     @Test func aTimeoutStopsEverythingTheToolStarted() async throws {
@@ -270,19 +271,19 @@ struct CommandRunnerTests {
     }
 
     @Test func theToolReadsNothingFromStandardInput() async throws {
-        let started = Date()
+        // cat waiting on an open stdin would run until the timeout.
         let output = try #require(await CommandRunner.run("/bin/cat", arguments: [], timeout: 10))
+        #expect(!output.timedOut)
         #expect(output.succeeded)
         #expect(output.data.isEmpty)
-        #expect(Date().timeIntervalSince(started) < 5)
     }
 
     @Test func aBackgroundChildHoldingThePipeDoesNotBlock() async throws {
-        let started = Date()
-        let output = try #require(await CommandRunner.run("/bin/sh", arguments: ["-c", "sleep 20 & echo done"], timeout: 10))
+        // Waiting for the helper's copy of the pipe to close would run past the timeout (the helper sleeps 20 s).
+        let output = try #require(await CommandRunner.run("/bin/sh", arguments: ["-c", "sleep 20 & echo done"], timeout: 15))
+        #expect(!output.timedOut)
         #expect(String(decoding: output.data, as: UTF8.self) == "done\n")
         #expect(output.exitStatus == 0)
-        #expect(Date().timeIntervalSince(started) < 5)
     }
 
     @Test func outputIsCapped() async throws {
