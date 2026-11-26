@@ -125,7 +125,9 @@ struct MCPServerTests {
         await waitFor { !approvals.waiting.isEmpty }
         #expect(approvals.waiting.count == 1)
         socket.close()
-        await waitFor(.seconds(5)) { approvals.waiting.isEmpty }
+        // The denial is audited after the sheet goes, on the call's own task: wait for both, or a loaded
+        // machine sees the sheet gone before the record is written.
+        await waitFor(.seconds(5)) { approvals.waiting.isEmpty && !host.auditRecords.isEmpty }
         #expect(approvals.waiting.isEmpty, "the sheet goes with the connection")
         #expect(approvals.answers == [.denied])
         #expect(host.executed.isEmpty)

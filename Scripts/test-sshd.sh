@@ -73,7 +73,17 @@ case "${1:-}" in
       [ -f "$DIR/sshd.pid" ] && kill "$(cat "$DIR/sshd.pid")" && rm -f "$DIR/sshd.pid"
       exit 1
     fi
-    sleep 0.3
+    # Wait until both accept a login, not just a connection: on a busy CI runner the first sessions can
+    # otherwise fail while sshd is still starting up.
+    for port in "$PORT" "$NOSFTP_PORT"; do
+      ready=no
+      for _ in $(seq 50); do
+        if ssh -q -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=2 \
+             -i "$DIR/user_ed25519" -p "$port" 127.0.0.1 true 2>/dev/null; then ready=yes; break; fi
+        sleep 0.2
+      done
+      [ "$ready" = yes ] || { echo "sshd on port $port does not accept a login yet; see $DIR" >&2; tail -20 "$DIR/sshd.log" >&2; }
+    done
     printf 'export REACHLY_TEST_SSH_PORT=%s\nexport REACHLY_TEST_SSH_NOSFTP_PORT=%s\nexport REACHLY_TEST_SSH_KEY=%q\n' "$PORT" "$NOSFTP_PORT" "$DIR/user_ed25519" > "$DIR/env.sh"
     echo "sshd listening on 127.0.0.1:$PORT (pid $(cat "$DIR/sshd.pid")), without SFTP on 127.0.0.1:$NOSFTP_PORT (pid $(cat "$DIR/sshd_nosftp.pid"))"
     echo "source $DIR/env.sh && swift test --filter Live"

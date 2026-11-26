@@ -37,7 +37,13 @@ jobs:
         run: |
           Scripts/test-sshd.sh start
           source .build/test-sshd/env.sh
-          swift test --filter Live || { echo "::warning::live tests failed once; retrying"; swift test --filter Live; }
+          # A failed run prints the end of sshd's log, so a failure on the runner can be diagnosed; the retry
+          # runs one test at a time.
+          swift test --filter Live || {
+            echo "::warning::live tests failed once; retrying one at a time"
+            tail -40 .build/test-sshd/sshd.log || true
+            swift test --filter Live --no-parallel || { tail -80 .build/test-sshd/sshd.log; exit 1; }
+          }
           Scripts/test-sshd.sh stop
 
       - name: Install XcodeGen
