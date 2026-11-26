@@ -265,40 +265,54 @@ struct KeyPairTests {
         #expect(decrypted.fingerprintSHA256 == pair.fingerprintSHA256)
     }
 
-    @Test func generatedRSAKeyRoundTrips() throws {
-        let pair = try SSHKeyPair.generate(.rsa3072, comment: "rsa-round-trip")
+    @Test func generatedRSAKeyRoundTrips() async throws {
+        // Finding two 1536-bit primes takes seconds of CPU on a CI runner, so off the shared pool (see onOwnThread).
+        let (pair, reparsed) = try await onOwnThread {
+            let pair = try SSHKeyPair.generate(.rsa3072, comment: "rsa-round-trip")
+            return (pair, try SSHKeyPair.parse(try pair.openSSHPrivateKey()))
+        }
         #expect(pair.keyType == "ssh-rsa")
         #expect(pair.bits == 3072)
         #expect(pair.canAuthenticate == false)
-        let reparsed = try SSHKeyPair.parse(try pair.openSSHPrivateKey())
         #expect(reparsed.fingerprintSHA256 == pair.fingerprintSHA256)
         #expect(reparsed.comment == "rsa-round-trip")
     }
 
     /// ssh-keygen must accept the files Reachly writes.
     @Test(.enabled(if: FileManager.default.isExecutableFile(atPath: "/usr/bin/ssh-keygen")))
-    func sshKeygenReadsExportedKeys() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("reachly-keypair-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
+    func sshKeygenReadsExportedKeys() async throws {
+        struct Check: Sendable { let fingerprint: String; let fingerprintOutput: String; let publicPrefix: String; let publicLine: String }
+        // RSA generation and two ssh-keygen runs per key: off the shared pool (see onOwnThread).
+        let checks = try await onOwnThread { () throws -> [Check] in
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("reachly-keypair-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            var checks: [Check] = []
+            for (index, type) in [SSHKeyPair.GenerationType.ed25519, .ecdsaP384, .rsa3072].enumerated() {
+                let pair = try SSHKeyPair.generate(type, comment: "exported")
+                let plainURL = directory.appendingPathComponent("key\(index)")
+                try pair.openSSHPrivateKey().write(to: plainURL, atomically: true, encoding: .utf8)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: plainURL.path)
+                let fingerprint = try Self.run("/usr/bin/ssh-keygen", ["-lf", plainURL.path])
 
-        for (index, type) in [SSHKeyPair.GenerationType.ed25519, .ecdsaP384, .rsa3072].enumerated() {
-            let pair = try SSHKeyPair.generate(type, comment: "exported")
-            let plainURL = directory.appendingPathComponent("key\(index)")
-            try pair.openSSHPrivateKey().write(to: plainURL, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: plainURL.path)
-            let fingerprint = try run("/usr/bin/ssh-keygen", ["-lf", plainURL.path])
-            #expect(fingerprint.contains(pair.fingerprintSHA256), "ssh-keygen output: \(fingerprint)")
-
-            let encryptedURL = directory.appendingPathComponent("key\(index).enc")
-            try pair.openSSHPrivateKey(passphrase: "secret", rounds: 2).write(to: encryptedURL, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: encryptedURL.path)
-            let publicLine = try run("/usr/bin/ssh-keygen", ["-y", "-P", "secret", "-f", encryptedURL.path])
-            #expect(publicLine.hasPrefix(pair.openSSHPublicKey.split(separator: " ").prefix(2).joined(separator: " ")), "ssh-keygen output: \(publicLine)")
+                let encryptedURL = directory.appendingPathComponent("key\(index).enc")
+                try pair.openSSHPrivateKey(passphrase: "secret", rounds: 2).write(to: encryptedURL, atomically: true, encoding: .utf8)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: encryptedURL.path)
+                let publicLine = try Self.run("/usr/bin/ssh-keygen", ["-y", "-P", "secret", "-f", encryptedURL.path])
+                checks.append(Check(fingerprint: pair.fingerprintSHA256, fingerprintOutput: fingerprint,
+                                    publicPrefix: pair.openSSHPublicKey.split(separator: " ").prefix(2).joined(separator: " "),
+                                    publicLine: publicLine))
+            }
+            return checks
+        }
+        #expect(checks.count == 3)
+        for check in checks {
+            #expect(check.fingerprintOutput.contains(check.fingerprint), "ssh-keygen output: \(check.fingerprintOutput)")
+            #expect(check.publicLine.hasPrefix(check.publicPrefix), "ssh-keygen output: \(check.publicLine)")
         }
     }
 
-    private func run(_ executable: String, _ arguments: [String]) throws -> String {
+    private static func run(_ executable: String, _ arguments: [String]) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments

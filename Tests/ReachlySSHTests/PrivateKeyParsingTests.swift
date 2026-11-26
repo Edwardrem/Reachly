@@ -123,14 +123,19 @@ import Testing
         #expect(key.fingerprintSHA256 == "SHA256:JqklqAW2O2uPh/H0YQtMB+8lRZLhiAat39vpnDddSZQ")
     }
 
-    @Test func encryptedKeysNeedThePassphrase() throws {
+    @Test func encryptedKeysNeedThePassphrase() async throws {
+        let encrypted = Self.encrypted
+        // Two bcrypt derivations: seconds of CPU on a CI runner, so off the shared pool (see onOwnThread).
+        let (wrong, right) = try await onOwnThread {
+            (Result { try SSHPrivateKey.parse(encrypted, passphrase: "wrong") }, Result { try SSHPrivateKey.parse(encrypted, passphrase: "secret") })
+        }
         #expect(throws: SSHKeyError.passphraseRequired) {
-            try SSHPrivateKey.parse(Self.encrypted)
+            try SSHPrivateKey.parse(encrypted)
         }
         #expect(throws: SSHKeyError.wrongPassphrase) {
-            try SSHPrivateKey.parse(Self.encrypted, passphrase: "wrong")
+            try wrong.get()
         }
-        let key = try SSHPrivateKey.parse(Self.encrypted, passphrase: "secret")
+        let key = try right.get()
         #expect(key.keyType == .ed25519)
         #expect(key.comment == "reachly-test-enc")
         #expect(key.fingerprintSHA256 == "SHA256:1CLaR56+r85N/Ym3Nkm4xdSEhmSoCbusgYYmwi12iGE")
