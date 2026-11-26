@@ -43,7 +43,8 @@ public final class TransferItem: Identifiable {
     /// exclusively there, and a clash fails the transfer.
     public let mayReplace: Bool
     /// The destination file this transfer made when it may not replace one, so a retry or resume writes to that file
-    /// again and to nothing else. (A copy between hosts claims its target; its temporary file on the Mac is its own.)
+    /// again, only while it is still that file, and to nothing else. (A copy between hosts claims its target; its
+    /// temporary file on the Mac is its own.)
     private let claim = SFTPClient.TargetClaim()
 
     init(kind: Kind, hostID: UUID, hostName: String, localURL: URL, remotePath: String, total: Int64?, mayReplace: Bool) {

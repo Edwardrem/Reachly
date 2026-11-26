@@ -72,14 +72,22 @@ struct SFTPWindowContent: View {
     struct DeleteRequest {
         let side: SFTPWindowModel.Side
         let source: PaneSource
+        /// The host's name (or "This Mac").
+        let place: String
         let items: [FileItem]
 
         var title: String {
-            items.count == 1 ? "Delete “\(items[0].name)”?" : "Delete \(items.count) items?"
+            items.count == 1 ? "Delete “\(FileNaming.displayed(items[0].name))”?" : "Delete \(items.count) items?"
         }
 
         var message: String {
-            source.isRemote ? "Files on the host are removed permanently; folders are emptied first." : "Local items are moved to the Trash."
+            guard source.isRemote else { return "Local items are moved to the Trash." }
+            let folders = items.filter { $0.isDirectory && !$0.isSymlink }.count
+            guard items.count == 1 else {
+                let inside = folders == 0 ? "" : folders == 1 ? ", with everything in the folder" : ", with everything in the folders"
+                return "They are removed permanently from \(place)\(inside). This can't be undone."
+            }
+            return "It is removed permanently from \(place)\(folders == 1 ? ", with everything in it" : ""). This can't be undone."
         }
     }
 
@@ -236,19 +244,23 @@ struct SFTPWindowContent: View {
             isIdle: isIdle,
             hasSelection: !model.focusedPane.selection.isEmpty,
             fileListHasFocus: model.focusedFileList == model.focusedSide,
-            reload: { if isIdle { reloadFocusedPane() } },
-            newFile: { if isIdle { sheet = .newFile(model.focusedSide) } },
-            newFolder: { if isIdle { sheet = .newFolder(model.focusedSide) } },
-            duplicate: { if isIdle { duplicateSelection() } },
+            reload: { if canAct { reloadFocusedPane() } },
+            newFile: { if canAct { sheet = .newFile(model.focusedSide) } },
+            newFolder: { if canAct { sheet = .newFolder(model.focusedSide) } },
+            duplicate: { if canAct { duplicateSelection() } },
             moveTo: {
                 let items = model.focusedPane.selectedItems
-                if isIdle, !items.isEmpty { sheet = .move(model.focusedSide, items) }
+                if canAct, !items.isEmpty { sheet = .move(model.focusedSide, items) }
             },
-            delete: { if isIdle { confirmDelete(model.focusedPane.selectedItems, on: model.focusedSide) } })
+            delete: { if canAct { confirmDelete(model.focusedPane.selectedItems, on: model.focusedSide) } })
     }
 
     /// No sheet or confirmation is open, so a menu command may act on the panes.
     private var isIdle: Bool { sheet == nil && pendingDelete == nil }
+
+    /// A Files menu command may run now: this window is the key window (checked as it runs, as the main-window
+    /// commands do) and nothing is open on it.
+    private var canAct: Bool { FilesWindow.isKey && isIdle }
 
     private func reloadFocusedPane() {
         let pane = model.focusedPane
@@ -268,7 +280,7 @@ struct SFTPWindowContent: View {
 
     private func confirmDelete(_ items: [FileItem], on side: SFTPWindowModel.Side) {
         guard !items.isEmpty else { return }
-        pendingDelete = DeleteRequest(side: side, source: model.pane(side).source, items: items)
+        pendingDelete = DeleteRequest(side: side, source: model.pane(side).source, place: model.pane(side).title, items: items)
     }
 
     private func delete(_ request: DeleteRequest) {

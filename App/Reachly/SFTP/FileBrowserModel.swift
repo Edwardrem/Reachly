@@ -23,6 +23,10 @@ struct FileItem: Identifiable, Hashable, Sendable {
     var id: String { path }
     var isHidden: Bool { name.hasPrefix(".") }
 
+    /// Why no path can stand for this item, or nil. A host can list a name such as "../x", "a/b" or one with a null
+    /// character: the pane shows it, but nothing may act on it or build a path from it.
+    var nameProblem: String? { FileNaming.pathComponentError(for: name) }
+
     var sizeDescription: String {
         guard !isDirectory, let size else { return isDirectory ? "—" : "" }
         return ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
@@ -137,6 +141,8 @@ final class LocalBackend: FileSystemBackend {
     }
 
     func copy(_ path: String, to newPath: String) async throws {
+        // Judged on resolved paths: a folder copied into itself through a symlink would never end.
+        try LocalFileOps.refuseFolderIntoItself(path, newPath)
         // copyItem refuses an existing target. Off the main thread: a large folder takes a while.
         try await Task.detached(priority: .userInitiated) {
             try FileManager.default.copyItem(atPath: path, toPath: newPath)
@@ -148,7 +154,8 @@ final class LocalBackend: FileSystemBackend {
     }
 
     func rename(_ path: String, to newPath: String) async throws {
-        try FileManager.default.moveItem(atPath: path, toPath: newPath)
+        // Never replaces what is at `newPath`, even something that appeared since the listing.
+        try LocalFileOps.move(path, to: newPath)
     }
 
     func setMode(_ mode: UInt32, path: String) async throws {
@@ -246,13 +253,16 @@ final class RemoteBackend: FileSystemBackend {
         for entry in entries {
             var attributes = entry.attributes
             var isDirectory = attributes.isDirectory
-            if attributes.isSymlink, let target = try? await client.stat(SFTP.join(path, entry.name)) {
+            let isUsable = FileNaming.pathComponentError(for: entry.name) == nil
+            if isUsable, attributes.isSymlink, let target = try? await client.stat(SFTP.join(path, entry.name)) {
                 isDirectory = target.isDirectory
                 if attributes.size == nil { attributes.size = target.size }
             }
             items.append(FileItem(
                 name: entry.name,
-                path: SFTP.join(path, entry.name),
+                // Every operation refuses an item with an unusable name. Its row id stands for nothing on the host
+                // even so: "�" and the name's bytes in hex, in this folder.
+                path: isUsable ? SFTP.join(path, entry.name) : SFTP.join(path, "\u{FFFD}" + entry.name.utf8.map { String(format: "%02x", $0) }.joined()),
                 isDirectory: isDirectory,
                 isSymlink: attributes.isSymlink,
                 size: attributes.size.map(Int64.init),
@@ -296,25 +306,14 @@ final class RemoteBackend: FileSystemBackend {
     func join(_ base: String, _ component: String) -> String { SFTP.join(base, component) }
     func parent(_ path: String) -> String { SFTP.parent(path) }
 
-    /// Every folder and file under `path`, with paths relative to it, for folder downloads. Folders come before
-    /// what is in them, so empty ones can be recreated too.
-    func walk(_ path: String) async throws -> (directories: [String], files: [(relative: String, item: FileItem)]) {
-        var directories: [String] = []
-        var files: [(String, FileItem)] = []
-        func visit(_ directory: String, prefix: String) async throws {
-            for item in try await list(directory) {
-                try Task.checkCancellation()
-                let relative = prefix.isEmpty ? item.name : prefix + "/" + item.name
-                if item.isDirectory {
-                    directories.append(relative)
-                    try await visit(item.path, prefix: relative)
-                } else {
-                    files.append((relative, item))
-                }
-            }
-        }
-        try await visit(path, prefix: "")
-        return (directories, files)
+    /// The entries of `path` as a folder transfer walks them (`FolderTransfer.plan`).
+    func listEntries(_ path: String) async throws -> [ListedEntry] {
+        try await client().listEntries(path)
+    }
+
+    /// The item at `path` as lstat sees it, or nil when nothing is there.
+    func entry(at path: String) async throws -> ListedEntry? {
+        try await client().entry(at: path)
     }
 }
 
@@ -439,6 +438,10 @@ final class PaneModel: Identifiable {
 
     func open(_ item: FileItem) async {
         guard item.isDirectory else { return }
+        if let failure = unusable(item) {
+            operationMessage = "Could not open “\(failure.name)”: \(failure.reason)"
+            return
+        }
         await load(item.path)
     }
 
@@ -561,6 +564,10 @@ final class PaneModel: Identifiable {
             operationMessage = problem
             return
         }
+        if let failure = unusable(item) {
+            operationMessage = "Could not rename “\(failure.name)”: \(failure.reason)"
+            return
+        }
         let backend = backend
         let folder = backend.parent(item.path)
         if folder == path, items.contains(where: { $0.name == name }) {
@@ -582,6 +589,10 @@ final class PaneModel: Identifiable {
         let backend = backend
         var failures: [Failure] = []
         for item in items {
+            if let failure = unusable(item) {
+                failures.append(failure)
+                continue
+            }
             do {
                 try await backend.delete(item)
             } catch {
@@ -596,6 +607,10 @@ final class PaneModel: Identifiable {
         let backend = backend
         var failures: [Failure] = []
         for item in items {
+            if let failure = unusable(item) {
+                failures.append(failure)
+                continue
+            }
             do {
                 try await backend.setMode(mode, path: item.path)
             } catch {
@@ -625,6 +640,13 @@ final class PaneModel: Identifiable {
         init(name: String, error: any Error) {
             self.init(name: name, reason: PaneModel.describe(error))
         }
+    }
+
+    /// A failure for an item on a host whose name no path can stand for (see `FileItem.nameProblem`), or nil when the
+    /// item can be acted on. Names on this Mac come from its own file system and are always one item's.
+    private func unusable(_ item: FileItem) -> Failure? {
+        guard source.isRemote, let problem = item.nameProblem else { return nil }
+        return Failure(name: FileNaming.displayed(item.name), reason: "Its name can't be used. \(problem)")
     }
 
     /// Puts an operation's failures into `operationMessage` (nil when there were none).
@@ -677,6 +699,10 @@ final class PaneModel: Identifiable {
         var copies: [String] = []
         var failures: [Failure] = []
         for item in items {
+            if let failure = unusable(item) {
+                failures.append(failure)
+                continue
+            }
             let folder = backend.parent(item.path)
             if namesByFolder[folder] == nil {
                 let listed = (try? await backend.list(folder)) ?? (folder == path ? self.items : [])
@@ -717,8 +743,8 @@ final class PaneModel: Identifiable {
         var folders: Set<String> = [destination]
         for item in items {
             let folder = backend.parent(item.path)
-            if let problem = FileNaming.validationError(for: item.name) {
-                failures.append(Failure(name: item.name, reason: problem))
+            if let failure = unusable(item) {
+                failures.append(failure)
             } else if folder == destination {
                 failures.append(Failure(name: item.name, reason: "It's already in that folder."))
             } else if item.isDirectory, destination == item.path || destination.hasPrefix(item.path + "/") {

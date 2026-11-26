@@ -9,14 +9,17 @@ extension SFTPClient {
         case allowed
         /// Never replace anything. The file is created exclusively (CREAT|EXCL on the server, O_CREAT|O_EXCL on
         /// the Mac) and a clash fails the transfer. `claim` remembers the file once it is made, so a retry or a
-        /// resume of the same transfer may write to it again; anything else at the destination is left alone.
+        /// resume of the same transfer may write to it again, but only while it is still that file: on the Mac
+        /// by device and inode, on a host (SFTP has no inode) by `RemoteFileIdentity`. A file put in its place
+        /// since fails the transfer and is not touched.
         case never(TargetClaim)
     }
 
     /// The destination file a no-overwrite transfer created, kept across its attempts. Give each transfer its own.
     public final class TargetClaim: Sendable {
         enum Made: Sendable, Equatable {
-            case remote(path: String)
+            /// A file on a host, and what is known about it to tell it from a file put in its place.
+            case remote(path: String, identity: RemoteFileIdentity)
             /// A file on this Mac, with its device and inode, so a file put in its place since is not taken for it.
             case local(path: String, identity: LocalFileIdentity)
         }
@@ -33,11 +36,47 @@ extension SFTPClient {
         func record(_ value: Made) {
             made.withLock { $0 = value }
         }
+
+        /// Notes that the server confirmed every byte before `bytes` of the remote file at `path`.
+        func recordConfirmed(_ bytes: UInt64, at path: String) {
+            made.withLock { made in
+                guard case .remote(path, var identity)? = made else { return }
+                identity.confirmed = bytes
+                made = .remote(path: path, identity: identity)
+            }
+        }
     }
 
     /// The error for a transfer that stopped because something is already at its destination.
     static func alreadyExists(_ path: String) -> SFTP.Error {
         .status(.failure, "An item with that name already exists", path: path)
+    }
+}
+
+/// What tells the file a no-overwrite upload made on a host from one put in its place, as SFTP v3 has no inode:
+/// its owner, group and permissions when it was made, and the bytes this upload wrote that the server confirmed. A
+/// retry also reads back the end of those bytes and compares them with the file being sent.
+struct RemoteFileIdentity: Sendable, Equatable {
+    var uid: UInt32?
+    var gid: UInt32?
+    var permissions: UInt32?
+    /// Every byte before this offset was written by this upload and confirmed by the server.
+    var confirmed: UInt64 = 0
+
+    init(_ attributes: SFTP.Attributes?) {
+        uid = attributes?.uid
+        gid = attributes?.gid
+        permissions = attributes?.permissions
+    }
+
+    /// True when `attributes` could be this file: a regular file with the same owner, group and permissions, holding
+    /// at least the confirmed bytes. Values the server didn't report when the file was made are not compared.
+    func admits(_ attributes: SFTP.Attributes) -> Bool {
+        guard attributes.kind == .regular, let size = attributes.size, size >= confirmed else { return false }
+        if let uid, attributes.uid != uid { return false }
+        if let gid, attributes.gid != gid { return false }
+        if let permissions, attributes.permissions != permissions { return false }
+        return true
     }
 }
 

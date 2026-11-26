@@ -208,4 +208,32 @@ import Testing
     @Test func anEmptyClipboardPlansNothing() {
         #expect(plan(.copy, [], into: "/a").isEmpty)
     }
+
+    // MARK: Names no path can stand for
+
+    @Test func anUnusableNameIsSkippedAndNamedOnEverySide() {
+        // A host can list such a name; landing it would write outside the folder pasted into.
+        for name in ["../x", "../../.zshenv", "a/b", "..", "a\u{0}b", String(repeating: "x", count: 256)] {
+            let item = FileClipboard.Item(path: "/srv/data/" + name, name: name, isDirectory: false)
+            let pairs: [(FileSide, FileSide)] = [(hostA, .local), (.local, hostA), (hostA, hostB), (hostA, hostA)]
+            for (from, to) in pairs {
+                for operation in [FileClipboard.Operation.copy, .cut] {
+                    let steps = plan(operation, [item], from: from, to: to, into: "/Users/me/Downloads")
+                    guard case .skip(_, let reason)? = steps.first, steps.count == 1 else {
+                        Issue.record("\(steps) for \(name.debugDescription)")
+                        continue
+                    }
+                    #expect(reason.contains("“\(FileNaming.displayed(name))”") && reason.contains("can't be used"), "\(reason)")
+                }
+            }
+        }
+    }
+
+    @Test func anUnusableNameDoesNotStopTheRestOfThePaste() {
+        let good = file("/srv/data/report.txt")
+        let bad = FileClipboard.Item(path: "/srv/data/x", name: "../x", isDirectory: false)
+        let steps = plan(.copy, [bad, good], from: hostA, to: .local, into: "/Users/me")
+        #expect(steps.count == 2)
+        #expect(steps.last == .transfer(item: good, directory: "/Users/me", name: "report.txt", deleteSourceWhenDone: false))
+    }
 }
