@@ -43,6 +43,39 @@ jobs:
           mkdir -p sparkle && tar -xf sparkle.tar.xz -C sparkle
           echo "$PWD/sparkle/bin" >> "$GITHUB_PATH"
 
+      - name: Test the tagged commit
+        # Nothing is built or published unless every test passes on this exact commit, the live SSH
+        # tests included. The report, with every test by name, is attached to the release, so the count
+        # can be checked without a Mac.
+        run: |
+          set -o pipefail
+          swift test --parallel 2>&1 | tee "$RUNNER_TEMP/unit.log"
+          Scripts/test-sshd.sh start
+          source .build/test-sshd/env.sh
+          swift test --filter Live 2>&1 | tee "$RUNNER_TEMP/live.log" || {
+            echo "::warning::live tests failed once; retrying one at a time"
+            swift test --filter Live --no-parallel 2>&1 | tee "$RUNNER_TEMP/live.log"
+          }
+          Scripts/test-sshd.sh stop
+          REPORT="$RUNNER_TEMP/tests.txt"
+          {
+            echo "Reachly ${{ steps.version.outputs.marketing }}: test report"
+            echo "Commit:    $(git rev-parse HEAD)"
+            echo "Workflow:  ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "Date:      $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo "Toolchain: $(swift --version 2>&1 | head -1)"
+            echo
+            echo "All tests (the live SSH tests are skipped in this run; they run next against a throwaway sshd):"
+            grep -E "Test run with [0-9]+ tests" "$RUNNER_TEMP/unit.log" | sed -E 's/^.*(Test run with)/  \1/'
+            echo "Live SSH tests:"
+            grep -E "Test run with [0-9]+ tests" "$RUNNER_TEMP/live.log" | tail -1 | sed -E 's/^.*(Test run with)/  \1/'
+            echo
+            echo "Every test, as module.suite/name:"
+            swift test list 2>/dev/null | sort
+          } > "$REPORT"
+          echo "TEST_REPORT=$REPORT" >> "$GITHUB_ENV"
+          grep -E "^  Test run" "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Import Developer ID certificate
         if: ${{ env.DEVELOPER_ID_P12 != '' }}
         env:
@@ -133,7 +166,9 @@ jobs:
           fi
 
       - name: Checksums
-        run: cd dist && shasum -a 256 *.dmg *.zip > SHA256SUMS && cat SHA256SUMS
+        run: |
+          cp "$TEST_REPORT" "dist/${APP_NAME}-${{ steps.version.outputs.marketing }}-tests.txt"
+          cd dist && shasum -a 256 *.dmg *.zip *-tests.txt > SHA256SUMS && cat SHA256SUMS
 
       - name: Release notes
         # docs/releases/<version>.md is the hand-written part when it exists;
@@ -160,6 +195,7 @@ jobs:
           files: |
             dist/*.dmg
             dist/*.zip
+            dist/*-tests.txt
             dist/SHA256SUMS
           body_path: dist/RELEASE_NOTES.md
           prerelease: ${{ steps.version.outputs.channel == 'beta' }}
