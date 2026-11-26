@@ -42,7 +42,9 @@ private func temporaryKnownHosts() -> KnownHostsStore {
             knownHosts: temporaryKnownHosts(),
             credentialStore: FakeCredentialStore())   // the Keychain can stall on CI runners
         let connecting = Task { await session.connect() }
-        try await waitUntil("password prompt") { session.prompt != nil }
+        // Generous: on a loaded CI runner the main actor this test shares with the rest of the suite can be
+        // busy for seconds before the connect task reaches the prompt (seen once at 10 s).
+        try await waitUntil("password prompt", timeout: .seconds(30)) { session.prompt != nil }
         guard case .password(let respond) = session.prompt else {
             Issue.record("expected a password prompt, got \(String(describing: session.prompt))")
             return
