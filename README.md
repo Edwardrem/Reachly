@@ -12,6 +12,21 @@ server: your hosts live in a local database and move between Macs as an
 encrypted `.reachly` file. The full plan is in
 [docs/PLAN.md](docs/PLAN.md).
 
+## Verify it yourself
+
+[![CI](https://github.com/Edwardrem/Reachly/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Edwardrem/Reachly/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/Edwardrem/Reachly)](https://github.com/Edwardrem/Reachly/releases/latest)
+
+- **Tests:** 814 automated tests in 104 suites (Swift Testing) run in GitHub Actions on every push to
+  `main` and every pull request. Live tests against a real `sshd`, started on the runner, run after them. Run them
+  yourself with `swift test`; the live ones are described under [Testing](#testing).
+- **Releases:** each `vX.Y.Z` tag is built, packaged and published by
+  [`release.yml`](.github/workflows/release.yml), with a DMG, the updater ZIP and `SHA256SUMS`.
+- **Security:** what the AI may do, how prompt injection is handled and tested, and what is not done yet, are in
+  [docs/SECURITY.md](docs/SECURITY.md).
+- **Updates:** the app checks for new versions and offers the download. Builds are ad-hoc signed, so updates can't
+  install in place until builds are signed with an Apple Developer ID.
+
 **Status:** all ten build steps are implemented (SSH transport, terminal, host
 list, tabs and splits, CI with Sparkle updates, Keychain vault with Touch ID
 and key management, snippets and history, export/import, Claude agent panel
@@ -282,8 +297,11 @@ conversations. Your real hosts never leave your Mac.
 - Dragging a remote file straight to the Finder is not supported; drop it on
   the local pane (or use Copy to Left) instead.
 - The app is not sandboxed yet, so reading keys in `~/.ssh`, serial devices
-  and open-with work without entitlements; revisit before App Store
-  distribution.
+  and open-with work without entitlements. See
+  [docs/SECURITY.md](docs/SECURITY.md#not-sandboxed) for what protects it
+  instead. Revisit before App Store distribution.
+- Builds are ad-hoc signed, not signed with a Developer ID: updates download
+  rather than install in place, and macOS asks you to confirm the first launch.
 
 ## Building
 
