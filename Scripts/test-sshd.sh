@@ -28,6 +28,8 @@ KbdInteractiveAuthentication no
 UsePAM no
 StrictModes no
 LogLevel VERBOSE
+# The SFTP live tests need the subsystem; without it every SFTP request is refused.
+Subsystem sftp internal-sftp
 # The live tests connect concurrently and some of them abort on purpose
 # (declined host keys): never drop pending connections at random, and do not
 # penalise 127.0.0.1 for the aborted ones (OpenSSH 9.8+ does by default).
