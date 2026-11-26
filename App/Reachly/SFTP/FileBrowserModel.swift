@@ -344,6 +344,8 @@ final class PaneModel: Identifiable {
     var sortAscending = true
     /// Called after an operation changed folders on this pane's side, so the window can refresh the other pane.
     @ObservationIgnored var onFoldersChanged: ((PaneSource, Set<String>) -> Void)?
+    /// Called when the pane shows another folder or switches to another host or the Mac (not on a reload).
+    @ObservationIgnored var onLocationChanged: (() -> Void)?
     private var history: [String] = []
     @ObservationIgnored private var loadTask: Task<Void, Never>?
     /// The load in flight. Each load takes a new generation; only the newest one may write its result.
@@ -387,6 +389,7 @@ final class PaneModel: Identifiable {
         history = []
         error = nil
         watch(nil)
+        onLocationChanged?()
         Task { await loadHome(history: .none) }
     }
 
@@ -472,13 +475,15 @@ final class PaneModel: Identifiable {
         isLoading = false
         switch result {
         case .success(let listed):
-            if navigation.history == .push, navigation.path != path { history.append(path) }
+            let moved = navigation.path != path
+            if navigation.history == .push, moved { history.append(path) }
             path = navigation.path
             items = listed
             let paths = Set(listed.map(\.path))
             selection = selection.filter { paths.contains($0) }
             error = nil
             watch(source == .local ? path : nil)
+            if moved { onLocationChanged?() }
         case .failure(let failure):
             if navigation.history == .back { history.append(navigation.path) }
             error = failure.localizedDescription

@@ -10,6 +10,8 @@ public enum SSHClientError: Error, LocalizedError, Sendable, Equatable {
     case hostKeyRejected
     case authenticationFailed(String)
     case channelFailed(String)
+    /// The server refused to start the named subsystem (such as `sftp`).
+    case subsystemUnavailable(String)
     /// The task running the command was cancelled; the channel was closed.
     case cancelled
 
@@ -20,6 +22,7 @@ public enum SSHClientError: Error, LocalizedError, Sendable, Equatable {
         case .hostKeyRejected: "The server's host key was not trusted."
         case .authenticationFailed(let detail): "Authentication failed: \(detail)"
         case .channelFailed(let detail): "Could not open a session: \(detail)"
+        case .subsystemUnavailable(let name): "The server doesn't offer the \(name) subsystem."
         case .cancelled: "The command was cancelled."
         }
     }

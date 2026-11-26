@@ -29,21 +29,38 @@ public final class SFTPClient: @unchecked Sendable {
 
     public var isOpen: Bool { channel.isActive }
 
-    /// Starts the `sftp` subsystem and negotiates version 3.
-    public static func open(on connection: SSHConnection) async throws -> SFTPClient {
+    /// Starts the `sftp` subsystem and negotiates version 3. Throws `SFTP.Error.unavailable` when the server
+    /// refuses the subsystem, and gives up when the server doesn't answer the request or the handshake within
+    /// `timeout`.
+    public static func open(on connection: SSHConnection, timeout: TimeAmount = .seconds(20)) async throws -> SFTPClient {
         let handler = SFTPResponseHandler()
-        let channel = try await connection.openSubsystem("sftp") { child in
-            try child.pipeline.syncOperations.addHandler(handler)
+        let channel: Channel
+        do {
+            channel = try await connection.openSubsystem("sftp", timeout: timeout) { child in
+                try child.pipeline.syncOperations.addHandler(handler)
+            }
+        } catch SSHClientError.subsystemUnavailable {
+            throw SFTP.Error.unavailable
         }
         let client = SFTPClient(connection: connection, channel: channel, handler: handler)
-        var writer = SFTPWriter()
-        writer.writeUInt8(SFTP.PacketType.initialize.rawValue)
-        writer.writeUInt32(SFTP.protocolVersion)
-        let reply = try await client.send(writer, expectingVersion: true)
-        var reader = SFTPReader(reply)
-        guard try reader.readUInt8() == SFTP.PacketType.version.rawValue else { throw SFTP.Error.protocolError("expected SSH_FXP_VERSION") }
-        let version = try reader.readUInt32()
-        guard version >= 3 else { throw SFTP.Error.unsupportedVersion(version) }
+        // A backstop: a server that took the subsystem but never answers would leave the caller waiting.
+        let deadline = channel.eventLoop.scheduleTask(in: timeout) {
+            handler.fail(id: SFTPResponseHandler.versionKey, error: SFTP.Error.protocolError("no answer to the handshake within \(timeout.nanoseconds / 1_000_000_000) seconds"))
+        }
+        defer { deadline.cancel() }
+        do {
+            var writer = SFTPWriter()
+            writer.writeUInt8(SFTP.PacketType.initialize.rawValue)
+            writer.writeUInt32(SFTP.protocolVersion)
+            let reply = try await client.send(writer, expectingVersion: true)
+            var reader = SFTPReader(reply)
+            guard try reader.readUInt8() == SFTP.PacketType.version.rawValue else { throw SFTP.Error.protocolError("expected SSH_FXP_VERSION") }
+            let version = try reader.readUInt32()
+            guard version >= 3 else { throw SFTP.Error.unsupportedVersion(version) }
+        } catch {
+            client.close()
+            throw error
+        }
         return client
     }
 
@@ -596,24 +613,17 @@ public final class SFTPClient: @unchecked Sendable {
 
     /// Downloads `remotePath` to `localURL`, with `pipelineDepth` reads in
     /// flight. With `resume`, appends to the existing local file starting at its size.
-    public func download(_ remotePath: String, to localURL: URL, resume: Bool = false, progress: Progress? = nil) async throws {
+    /// With `overwrite: .never`, the local file is created with O_CREAT|O_EXCL and a clash fails the download.
+    public func download(_ remotePath: String, to localURL: URL, resume: Bool = false, overwrite: Overwrite = .allowed, progress: Progress? = nil) async throws {
         let attributes = try await stat(remotePath)
         let total = attributes.size.map(Int64.init)
-        var offset: UInt64 = 0
         let manager = FileManager.default
-        if resume, let existing = try? manager.attributesOfItem(atPath: localURL.path)[.size] as? NSNumber {
-            offset = existing.uint64Value
-            if let total, Int64(offset) >= total {
-                progress?(total, total)
-                return
-            }
-        } else {
-            try manager.createDirectory(at: localURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            manager.createFile(atPath: localURL.path, contents: nil)
-        }
-        let file = try FileHandle(forWritingTo: localURL)
+        let (file, offset) = try LocalTarget.open(localURL, resume: resume, overwrite: overwrite)
         defer { try? file.close() }
-        try file.seek(toOffset: offset)
+        if resume, let total, Int64(offset) >= total {
+            progress?(total, total)
+            return
+        }
         let handle = try await openFile(remotePath, flags: [.read])
         defer { Task { try? await self.closeHandle(handle) } }
 
@@ -654,39 +664,74 @@ public final class SFTPClient: @unchecked Sendable {
 
     /// Uploads `localURL` to `remotePath` with `pipelineDepth` writes in flight.
     /// With `resume`, continues from the remote file's current size.
-    public func upload(_ localURL: URL, to remotePath: String, resume: Bool = false, mode: UInt32? = nil, progress: Progress? = nil) async throws {
+    /// With `overwrite: .never`, the remote file is created with CREAT|EXCL and a clash fails the upload.
+    public func upload(_ localURL: URL, to remotePath: String, resume: Bool = false, mode: UInt32? = nil, overwrite: Overwrite = .allowed, progress: Progress? = nil) async throws {
         let total = Int64((try FileManager.default.attributesOfItem(atPath: localURL.path)[.size] as? NSNumber)?.int64Value ?? 0)
-        var offset: UInt64 = 0
-        if resume, let existing = try? await stat(remotePath).size, Int64(existing) <= total {
-            offset = existing
-        }
         let file = try FileHandle(forReadingFrom: localURL)
         defer { try? file.close() }
+        let (handle, start) = try await openUploadTarget(remotePath, resume: resume, mode: mode, total: total, overwrite: overwrite)
+        var offset = start
         try file.seek(toOffset: offset)
-        let flags: SFTP.OpenFlags = offset > 0 ? [.write] : [.write, .create, .truncate]
-        let handle = try await openFile(remotePath, flags: flags, mode: mode)
         var transferred = Int64(offset)
         progress?(transferred, total)
-        while true {
-            try Task.checkCancellation()
-            var batch: [(UInt64, [UInt8])] = []
-            for _ in 0..<Self.pipelineDepth {
-                guard let data = try file.read(upToCount: Self.chunkSize), !data.isEmpty else { break }
-                batch.append((offset, [UInt8](data)))
-                offset += UInt64(data.count)
-            }
-            if batch.isEmpty { break }
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                for (start, bytes) in batch {
-                    group.addTask { try await self.write(handle: handle, offset: start, data: bytes) }
+        do {
+            while true {
+                try Task.checkCancellation()
+                var batch: [(UInt64, [UInt8])] = []
+                for _ in 0..<Self.pipelineDepth {
+                    guard let data = try file.read(upToCount: Self.chunkSize), !data.isEmpty else { break }
+                    batch.append((offset, [UInt8](data)))
+                    offset += UInt64(data.count)
                 }
-                try await group.waitForAll()
+                if batch.isEmpty { break }
+                try await withThrowingTaskGroup(of: Void.self) { group in
+                    for (start, bytes) in batch {
+                        group.addTask { try await self.write(handle: handle, offset: start, data: bytes) }
+                    }
+                    try await group.waitForAll()
+                }
+                transferred += Int64(batch.reduce(0) { $0 + $1.1.count })
+                progress?(transferred, total)
             }
-            transferred += Int64(batch.reduce(0) { $0 + $1.1.count })
-            progress?(transferred, total)
+        } catch {
+            // Without waiting: a paused or failed transfer shouldn't hang on a server that stopped answering.
+            Task { [handle] in try? await self.closeHandle(handle) }
+            throw error
         }
         try await closeHandle(handle)
         progress?(transferred, total)
+    }
+
+    /// Opens the remote file an upload writes into and the offset to start at.
+    private func openUploadTarget(_ path: String, resume: Bool, mode: UInt32?, total: Int64, overwrite: Overwrite) async throws -> (handle: [UInt8], offset: UInt64) {
+        guard case .never(let claim) = overwrite else {
+            var offset: UInt64 = 0
+            if resume, let existing = try? await stat(path).size, Int64(existing) <= total {
+                offset = existing
+            }
+            let flags: SFTP.OpenFlags = offset > 0 ? [.write] : [.write, .create, .truncate]
+            return (try await openFile(path, flags: flags, mode: mode), offset)
+        }
+        if claim.current == .remote(path: path) {
+            // The file an earlier attempt of this transfer made: continue it, or start it over.
+            do {
+                let existing = try await lstat(path)
+                guard existing.kind == .regular else { throw Self.alreadyExists(path) }
+                var offset: UInt64 = 0
+                if resume, let size = existing.size, Int64(size) <= total {
+                    offset = size
+                }
+                let flags: SFTP.OpenFlags = offset > 0 ? [.write] : [.write, .create, .truncate]
+                return (try await openFile(path, flags: flags, mode: mode), offset)
+            } catch let error as SFTP.Error where error.isNoSuchFile {
+                // Removed since: start again with a new file.
+            }
+        }
+        // Atomic on the server, and the request is not abandoned when the task is cancelled, so the claim is
+        // recorded whenever the file was made.
+        let handle = try await createExclusively(path, mode: mode)
+        claim.record(.remote(path: path))
+        return (handle, 0)
     }
 }
 

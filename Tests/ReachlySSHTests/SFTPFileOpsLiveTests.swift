@@ -19,7 +19,7 @@ struct SFTPFileOpsLiveTests {
             hostKeyVerifier: InsecureAcceptAllHostKeys())
         let sftp: SFTPClient
         do {
-            // A server without an sftp subsystem never answers the handshake; fail instead of waiting forever.
+            // A server without an sftp subsystem refuses it; the timeout keeps a regression from hanging the run.
             sftp = try await Self.withTimeout(.seconds(15)) { try await SFTPClient.open(on: connection) }
         } catch {
             connection.close()
@@ -106,6 +106,51 @@ struct SFTPFileOpsLiveTests {
         } catch {
             return error
         }
+    }
+
+    // MARK: A server without SFTP
+
+    @Test(.enabled(if: LiveServer.current?.noSFTPPort != nil))
+    func openingSFTPWhereTheServerRefusesItFailsPromptlyAndClearly() async throws {
+        let server = try #require(LiveServer.current)
+        let port = try #require(server.noSFTPPort)
+        let key = try SSHPrivateKey.load(fromPath: server.keyPath)
+        let connection = try await SSHConnection.connect(
+            host: server.host, port: port,
+            credentials: SSHCredentials(username: server.user, secret: .privateKey(key)),
+            hostKeyVerifier: InsecureAcceptAllHostKeys())
+        defer { connection.close() }
+
+        let clock = ContinuousClock()
+        let started = clock.now
+        // The backstop here only keeps a regression from hanging the run; the refusal itself takes one round trip.
+        let error = await Self.error { _ = try await Self.withTimeout(.seconds(10)) { try await SFTPClient.open(on: connection) } }
+        let elapsed = clock.now - started
+        #expect(error as? SFTP.Error == .unavailable, "\(String(describing: error))")
+        #expect(error?.localizedDescription == "This server doesn't offer SFTP.")
+        #expect(elapsed < .seconds(3), "took \(elapsed)")
+
+        // Only the refused channel was closed: the connection still runs commands.
+        let result = try await connection.run("echo still-here")
+        #expect(result.stdoutText == "still-here\n")
+    }
+
+    @Test func aRefusedSubsystemIsReportedByName() async throws {
+        // `openSubsystem` waits for the answer to its want-reply request: an unknown name is refused the way a missing
+        // Subsystem line refuses sftp, and the error names it.
+        let server = try #require(LiveServer.current)
+        let key = try SSHPrivateKey.load(fromPath: server.keyPath)
+        let connection = try await SSHConnection.connect(
+            host: server.host, port: server.port,
+            credentials: SSHCredentials(username: server.user, secret: .privateKey(key)),
+            hostKeyVerifier: InsecureAcceptAllHostKeys())
+        defer { connection.close() }
+        let error = await Self.error {
+            _ = try await Self.withTimeout(.seconds(10)) {
+                try await connection.openSubsystem("reachly-no-such-subsystem") { _ in }
+            }
+        }
+        #expect(error as? SSHClientError == .subsystemUnavailable("reachly-no-such-subsystem"), "\(String(describing: error))")
     }
 
     // MARK: createFile
@@ -437,6 +482,119 @@ struct SFTPFileOpsLiveTests {
             #expect(error is CancellationError, "\(String(describing: error))")
             #expect(await !Self.exists(root + "/dst", sftp))
             #expect(try await Self.names(src, sftp) == ["a", "b", "c"])
+        }
+    }
+
+    // MARK: Transfers that never overwrite (Paste)
+
+    /// A file on this Mac for an upload, in a temporary folder `body` may use; removed afterwards.
+    private static func withLocalFolder(_ body: (URL) async throws -> Void) async throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "reachly-transfer-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try await body(folder)
+    }
+
+    @Test func anExclusiveUploadRefusesAnExistingFileAndLeavesItIntact() async throws {
+        try await withScratch { sftp, root in
+            try await Self.withLocalFolder { folder in
+                let local = folder.appending(path: "new.txt")
+                try Data("replacement".utf8).write(to: local)
+                try await sftp.writeFile(Data("keep me".utf8), to: root + "/keep.txt", mode: 0o640)
+
+                let claim = SFTPClient.TargetClaim()
+                for resume in [false, true] {
+                    let error = await Self.error { try await sftp.upload(local, to: root + "/keep.txt", resume: resume, overwrite: .never(claim)) }
+                    #expect(error?.localizedDescription.contains("already exists") == true, "\(String(describing: error))")
+                }
+                #expect(try await sftp.readFile(root + "/keep.txt") == Data("keep me".utf8))
+                #expect(try await sftp.stat(root + "/keep.txt").mode == 0o640)
+                #expect(!claim.hasMadeFile)
+
+                // A folder and a dangling link are refused too; the link's target is not created.
+                try await sftp.makeDirectory(root + "/folder")
+                await #expect(throws: SFTP.Error.self) { try await sftp.upload(local, to: root + "/folder", overwrite: .never(claim)) }
+                try await sftp.symlink(target: root + "/nowhere.txt", at: root + "/dangling")
+                await #expect(throws: SFTP.Error.self) { try await sftp.upload(local, to: root + "/dangling", overwrite: .never(claim)) }
+                #expect(await !Self.exists(root + "/nowhere.txt", sftp))
+
+                // The same upload to a free name works, and the old behaviour still replaces.
+                try await sftp.upload(local, to: root + "/fresh.txt", overwrite: .never(SFTPClient.TargetClaim()))
+                #expect(try await sftp.readFile(root + "/fresh.txt") == Data("replacement".utf8))
+                try await sftp.upload(local, to: root + "/keep.txt")
+                #expect(try await sftp.readFile(root + "/keep.txt") == Data("replacement".utf8))
+            }
+        }
+    }
+
+    @Test func aRetryAfterAPartialExclusiveUploadSucceeds() async throws {
+        try await withScratch { sftp, root in
+            try await Self.withLocalFolder { folder in
+                let size = 3 * 1024 * 1024 + 11
+                let content = Self.bytes(size, seed: 5)
+                let local = folder.appending(path: "big.bin")
+                try content.write(to: local)
+                let target = root + "/big.bin"
+
+                // The first attempt stops after its first batch, as a pause or a dropped connection would.
+                let claim = SFTPClient.TargetClaim()
+                let first = Task {
+                    try await sftp.upload(local, to: target, overwrite: .never(claim)) { transferred, _ in
+                        if transferred > 0 { withUnsafeCurrentTask { $0?.cancel() } }
+                    }
+                }
+                #expect(await first.result.error is CancellationError)
+                #expect(claim.hasMadeFile)
+                let partial = try #require(try await sftp.stat(target).size)
+                #expect(partial > 0 && partial < UInt64(size))
+
+                // Another transfer may not touch it.
+                let other = await Self.error { try await sftp.upload(local, to: target, resume: true, overwrite: .never(SFTPClient.TargetClaim())) }
+                #expect(other?.localizedDescription.contains("already exists") == true)
+                #expect(try await sftp.stat(target).size == partial)
+
+                // The retry continues its own partial file.
+                let log = ProgressLog()
+                try await sftp.upload(local, to: target, resume: true, overwrite: .never(claim)) { log.record($0, $1) }
+                #expect(log.all.first.map { UInt64($0.0) } == partial)
+                #expect(try await sftp.readFile(target) == content)
+
+                // A retry from the start (a copy between hosts uploads again in full) rewrites its own file.
+                try await sftp.upload(local, to: target, resume: false, overwrite: .never(claim))
+                #expect(try await sftp.readFile(target) == content)
+
+                // If its file was removed meanwhile, the retry makes a new one.
+                try await sftp.remove(target)
+                try await sftp.upload(local, to: target, resume: true, overwrite: .never(claim))
+                #expect(try await sftp.readFile(target) == content)
+            }
+        }
+    }
+
+    @Test func anExclusiveDownloadRefusesAnExistingLocalFileAndRetriesItsOwn() async throws {
+        try await withScratch { sftp, root in
+            try await Self.withLocalFolder { folder in
+                let content = Self.bytes(2 * 1024 * 1024 + 3, seed: 8)
+                try await sftp.writeFile(content, to: root + "/remote.bin")
+
+                let existing = folder.appending(path: "existing.bin")
+                try Data("keep me".utf8).write(to: existing)
+                let error = await Self.error { try await sftp.download(root + "/remote.bin", to: existing, overwrite: .never(SFTPClient.TargetClaim())) }
+                #expect(error?.localizedDescription.contains("already exists") == true, "\(String(describing: error))")
+                #expect(try Data(contentsOf: existing) == Data("keep me".utf8))
+
+                let local = folder.appending(path: "fresh.bin")
+                let claim = SFTPClient.TargetClaim()
+                let first = Task {
+                    try await sftp.download(root + "/remote.bin", to: local, overwrite: .never(claim)) { transferred, _ in
+                        if transferred > 0 { withUnsafeCurrentTask { $0?.cancel() } }
+                    }
+                }
+                #expect(await first.result.error is CancellationError)
+                #expect(claim.hasMadeFile)
+                try await sftp.download(root + "/remote.bin", to: local, resume: true, overwrite: .never(claim))
+                #expect(try Data(contentsOf: local) == content)
+            }
         }
     }
 

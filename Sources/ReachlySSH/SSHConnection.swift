@@ -207,18 +207,43 @@ public final class SSHConnection: @unchecked Sendable {
         return try await openChannel(type: .directTCPIP(.init(targetHost: targetHost, targetPort: targetPort, originatorAddress: origin)), initializer: initializer)
     }
 
-    /// Starts a subsystem (such as `sftp`) on a session channel. The channel
-    /// carries raw bytes; `initializer` adds the handlers.
-    public func openSubsystem(_ name: String, initializer: @escaping @Sendable (Channel) throws -> Void) async throws -> Channel {
-        let child = try await openChannel(type: .session) { child in
-            try child.pipeline.syncOperations.addHandler(SSHChannelDataCodec())
-            try initializer(child)
+    /// Starts a subsystem (such as `sftp`) on a session channel and returns
+    /// once the server has accepted it. The channel carries raw bytes;
+    /// `initializer` adds the handlers.
+    ///
+    /// Throws `SSHClientError.subsystemUnavailable` when the server refuses
+    /// the subsystem (OpenSSH does when sshd_config has no `Subsystem` line
+    /// for it), and `channelFailed` when it gives no answer within `timeout`.
+    public func openSubsystem(_ name: String, timeout: TimeAmount = .seconds(20), initializer: @escaping @Sendable (Channel) throws -> Void) async throws -> Channel {
+        // Writing the request completes once it is sent, not when the server answers; the reply comes back as a
+        // channel event, so a handler watches for it from before the request goes out.
+        let reply = channel.eventLoop.makePromise(of: Void.self)
+        let child: Channel
+        do {
+            child = try await openChannel(type: .session) { child in
+                try child.pipeline.syncOperations.addHandler(ChannelRequestReplyHandler(promise: reply))
+                try child.pipeline.syncOperations.addHandler(SSHChannelDataCodec())
+                try initializer(child)
+            }
+        } catch {
+            reply.fail(error) // never leave a promise unfulfilled
+            throw error
         }
+        let deadline = child.eventLoop.scheduleTask(in: timeout) {
+            reply.fail(SSHClientError.channelFailed("the server did not answer the \(name) request within \(timeout.nanoseconds / 1_000_000_000) seconds"))
+        }
+        defer { deadline.cancel() }
         do {
             try await child.triggerUserOutboundEvent(SSHChannelRequestEvent.SubsystemRequest(subsystem: name, wantReply: true)).get()
+            try await reply.futureResult.get()
         } catch {
+            reply.fail(error)
             child.close(promise: nil)
-            throw SSHClientError.channelFailed("the server refused the \(name) subsystem: \(Self.describe(error))")
+            switch error {
+            case is ChannelRequestReplyHandler.Refused: throw SSHClientError.subsystemUnavailable(name)
+            case let error as SSHClientError: throw error
+            default: throw SSHClientError.channelFailed("the server did not start the \(name) subsystem: \(Self.describe(error))")
+            }
         }
         return child
     }
