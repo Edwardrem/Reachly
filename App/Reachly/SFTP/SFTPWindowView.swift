@@ -94,13 +94,9 @@ struct SFTPWindowContent: View {
             TransferListView(queue: model.queue)
                 .frame(height: 170)
         }
-        .background {
-            // ⌘D has no button of its own in the window (Duplicate is in the item menu); this one carries the shortcut.
-            Button("Duplicate", action: duplicateSelection)
-                .keyboardShortcut("d", modifiers: .command)
-                .opacity(0)
-                .accessibilityHidden(true)
-        }
+        // The Files menu's commands and their shortcuts (`FilesCommands`), live while this window is in front.
+        .focusedSceneValue(\.filesWindow, menuCommands)
+        .background(FilesWindowReader())
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
@@ -120,7 +116,6 @@ struct SFTPWindowContent: View {
                 } label: {
                     Label("New File", systemImage: "doc.badge.plus")
                 }
-                .keyboardShortcut("n", modifiers: [.command, .option])
                 .help("Create an empty file in the focused pane")
                 Button {
                     guard let item = model.focusedPane.selectedItems.first, model.focusedPane.selection.count == 1 else { return }
@@ -141,13 +136,9 @@ struct SFTPWindowContent: View {
                     Label("Delete", systemImage: "trash")
                 }
                 .disabled(model.focusedPane.selection.isEmpty)
-                Button {
-                    let pane = model.focusedPane
-                    Task { await pane.refresh() }
-                } label: {
+                Button(action: reloadFocusedPane) {
                     Label("Reload", systemImage: "arrow.clockwise")
                 }
-                .keyboardShortcut("r", modifiers: .command)
                 .help("Reload the focused pane")
             }
         }
@@ -235,6 +226,33 @@ struct SFTPWindowContent: View {
     /// Every name in the pane's folder, hidden ones too.
     private func names(in pane: PaneModel) -> Set<String> {
         Set(pane.items.map(\.name))
+    }
+
+    // MARK: Menu commands
+
+    /// The Files menu's view of this window. Each action checks again when it runs, as the menu can lag behind.
+    private var menuCommands: FilesWindowCommands {
+        FilesWindowCommands(
+            isIdle: isIdle,
+            hasSelection: !model.focusedPane.selection.isEmpty,
+            fileListHasFocus: model.focusedFileList == model.focusedSide,
+            reload: { if isIdle { reloadFocusedPane() } },
+            newFile: { if isIdle { sheet = .newFile(model.focusedSide) } },
+            newFolder: { if isIdle { sheet = .newFolder(model.focusedSide) } },
+            duplicate: { if isIdle { duplicateSelection() } },
+            moveTo: {
+                let items = model.focusedPane.selectedItems
+                if isIdle, !items.isEmpty { sheet = .move(model.focusedSide, items) }
+            },
+            delete: { if isIdle { confirmDelete(model.focusedPane.selectedItems, on: model.focusedSide) } })
+    }
+
+    /// No sheet or confirmation is open, so a menu command may act on the panes.
+    private var isIdle: Bool { sheet == nil && pendingDelete == nil }
+
+    private func reloadFocusedPane() {
+        let pane = model.focusedPane
+        Task { await pane.refresh() }
     }
 
     private func duplicateSelection() {

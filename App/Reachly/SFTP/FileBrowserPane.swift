@@ -66,6 +66,7 @@ struct FileBrowserPane: View {
         }
         .onChange(of: focus) { _, focus in
             if focus != nil { focusPane() }
+            model.fileList(on: side, hasFocus: focus == .table)
         }
         .onChange(of: pane.path, initial: true) { _, path in pathDraft = path }
     }

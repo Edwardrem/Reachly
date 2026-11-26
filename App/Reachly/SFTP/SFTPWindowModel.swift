@@ -35,6 +35,8 @@ final class SFTPWindowModel {
     let left: PaneModel
     let right: PaneModel
     var focusedSide: Side = .right
+    /// The pane whose file list has keyboard focus, if one does (not its path field).
+    private(set) var focusedFileList: Side?
     var status: String?
     /// True while a paste runs; another paste waits until it is done.
     private(set) var isPasting = false
@@ -73,6 +75,15 @@ final class SFTPWindowModel {
     }
 
     func pane(_ side: Side) -> PaneModel { side == .left ? left : right }
+
+    /// A pane reports when its file list gains or loses keyboard focus.
+    func fileList(on side: Side, hasFocus: Bool) {
+        if hasFocus {
+            focusedFileList = side
+        } else if focusedFileList == side {
+            focusedFileList = nil
+        }
+    }
     var focusedPane: PaneModel { pane(focusedSide) }
     var otherPane: PaneModel { pane(focusedSide == .left ? .right : .left) }
 
