@@ -243,6 +243,27 @@ struct ACPProtocolTests {
         #expect(ACPAgent.errorSummary("  \n") == nil)
         #expect((ACPAgent.errorSummary(String(repeating: "word ", count: 400)) ?? "").count <= 400)
     }
+
+    @Test func commonSecretShapesAreMasked() {
+        let mask = ACPAgent.maskingSecrets
+        // AWS: after its name, after a word, and on its own (base64 with slashes).
+        #expect(mask("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY") == "AWS_SECRET_ACCESS_KEY=…")
+        #expect(mask("using secret wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY now") == "using secret … now")
+        #expect(mask("signing with wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY") == "signing with …")
+        // A short password after its name.
+        #expect(mask("login failed: password=hunter2hunter2") == "login failed: password=…")
+        #expect(mask("passwd: hunter2") == "passwd: …")
+        // A bearer token in a header, and a JSON field.
+        #expect(mask("request had Authorization: Bearer abcdef0123456789xyz") == "request had Authorization: Bearer …")
+        #expect(mask(#"{"api_key": "sk-live-1234567890"}"#) == #"{"api_key": "…"}"#)
+        // URL-encoded, after its name and on its own.
+        #expect(mask("GET /callback?access_token=ya29%2Ea0AfH6SMBx%3D%3D&state=7") == "GET /callback?access_token=…&state=7")
+        #expect(mask("cookie c2VjcmV0LXRva2Vu%2Bc2VjcmV0%2Fc2VjcmV0%3D%3D") == "cookie …")
+        // Ordinary words stay.
+        #expect(mask("token expired, key not found, keychain locked") == "token expired, key not found, keychain locked")
+        #expect(mask("monkey=banana") == "monkey=banana")
+        #expect(mask("panic: index out of range") == "panic: index out of range")
+    }
 }
 
 // MARK: - JSON-RPC connection

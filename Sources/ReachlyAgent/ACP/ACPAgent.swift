@@ -481,9 +481,34 @@ public final class ACPAgent: ExternalAgent {
             .filter { !$0.isEmpty }
             .suffix(lines)
         guard !kept.isEmpty else { return nil }
-        var text = kept.joined(separator: " · ")
-        text = text.replacingOccurrences(of: #"[A-Za-z0-9_\-+]{32,}"#, with: "…", options: .regularExpression)
+        var text = maskingSecrets(kept.joined(separator: " · "))
         if text.count > characters { text = "…" + text.suffix(characters - 1) }
         return text
+    }
+
+    /// A value after a word that names a secret: `password=…`, `ACCESS_TOKEN: …`, `Authorization: Bearer …`,
+    /// `"api_key": "…"`, `token …`. Group 1 is the word, 2 what separates it from the value, 4 the value.
+    nonisolated private static let keyedSecret = try! NSRegularExpression(
+        pattern: #"(?i)(?<![a-z])(token|key|secret|password|passwd|bearer|authorization)(?![a-z])(["']?\s*[:=]\s*["']?|\s+)((?:bearer|basic|token)\s+)?([^\s"'<>,;&]+)"#)
+
+    /// Anything long enough to be a token on its own, including base64 (`+`, `/`, `=`) and URL encoding (`%`).
+    nonisolated private static let longToken = try! NSRegularExpression(pattern: #"[A-Za-z0-9_\-+/=%]{32,}"#)
+
+    /// `text` with anything that looks like a secret replaced by `…`. After a word that names one, the value goes
+    /// when it follows `=` or `:` (any length for a password or secret, 8 characters or more for the rest) or a
+    /// space (20 or more, so `token expired` stays); anything of 32 such characters goes wherever it is.
+    nonisolated static func maskingSecrets(_ text: String) -> String {
+        let source = text as NSString
+        var masked = text
+        for match in keyedSecret.matches(in: text, range: NSRange(location: 0, length: source.length)).reversed() {
+            let word = source.substring(with: match.range(at: 1)).lowercased()
+            let separator = source.substring(with: match.range(at: 2))
+            let value = source.substring(with: match.range(at: 4))
+            let explicit = separator.contains(":") || separator.contains("=")
+            let minimum = explicit ? (["password", "passwd", "secret"].contains(word) ? 1 : 8) : 20
+            guard value.count >= minimum, let range = Range(match.range(at: 4), in: masked) else { continue }
+            masked.replaceSubrange(range, with: "…")
+        }
+        return longToken.stringByReplacingMatches(in: masked, range: NSRange(masked.startIndex..., in: masked), withTemplate: "…")
     }
 }
