@@ -44,7 +44,9 @@ public enum AgentAuditDecision: String, Codable, Sendable, CaseIterable {
         }
     }
 
-    private static let commentMarker = "Comment: "
+    /// The labels inside a `changesRequestedDetail`, read back by `AgentAuditDetail`.
+    static let commentMarker = "Comment: "
+    static let suggestionMarker = "Suggested command: "
 
     /// The decision detail for `.changesRequested`: the guardrail reason, the
     /// suggested command when there is one, and the comment last (as typed, to
@@ -54,7 +56,7 @@ public enum AgentAuditDecision: String, Codable, Sendable, CaseIterable {
     public static func changesRequestedDetail(guardrail: String, comment: String, suggestion: String?) -> String {
         var fields: [String] = []
         if !guardrail.isEmpty { fields.append(guardrail) }
-        if let suggestion { fields.append("Suggested command: \(suggestion)") }
+        if let suggestion { fields.append(suggestionMarker + suggestion) }
         var lines = fields.flatMap { field in
             splitLines(field).enumerated().map { index, line in
                 index == 0 && !startsWithMarker(line) ? line : "  " + line
@@ -71,6 +73,34 @@ public enum AgentAuditDecision: String, Codable, Sendable, CaseIterable {
         let first = String(lines[index].unicodeScalars.dropFirst(commentMarker.unicodeScalars.count))
         let comment = ([first] + lines[(index + 1)...]).joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
         return comment.isEmpty ? nil : comment
+    }
+
+    /// The guardrail reason and suggested command inside a `changesRequestedDetail`,
+    /// with the two-space indent of their continuation lines removed: the inverse
+    /// of what `changesRequestedDetail` writes before the comment.
+    static func changesRequestedHead(in detail: String) -> (guardrail: String, suggestion: String?) {
+        let lines = splitLines(detail)
+        let head = lines[..<(lines.firstIndex(where: startsWithMarker) ?? lines.endIndex)]
+        var fields: [[String]] = []
+        for line in head {
+            if line.hasPrefix("  "), !fields.isEmpty {
+                fields[fields.count - 1].append(String(line.dropFirst(2)))
+            } else {
+                // A field's first line; one that began with the comment marker was indented too.
+                fields.append([line.hasPrefix("  ") ? String(line.dropFirst(2)) : line])
+            }
+        }
+        var guardrail: [String] = []
+        var suggestion: String?
+        for field in fields {
+            let text = field.joined(separator: "\n")
+            if suggestion == nil, text.hasPrefix(suggestionMarker) {
+                suggestion = String(text.dropFirst(suggestionMarker.count))
+            } else {
+                guardrail.append(text)
+            }
+        }
+        return (guardrail.joined(separator: "\n"), suggestion)
     }
 
     /// Split at every "\n" code unit, CRLF included, so a split and a join round-trip.

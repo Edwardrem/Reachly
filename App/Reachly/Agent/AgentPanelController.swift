@@ -128,9 +128,25 @@ final class AgentPanelController {
         let messages = (try? AgentTranscript.decode(stored.transcript)) ?? []
         if let session {
             session.replace(messages: messages)
+            // Commands from here on are audited under this conversation, not the one shown before.
+            session.toolRunner.conversationID = stored.uuid
         } else {
             session = makeSession(messages: messages)
         }
+    }
+
+    /// Opens a saved conversation from elsewhere in the app (AI History), moving
+    /// the scope to the host or group it was saved for. Returns false when it no
+    /// longer exists. A conversation already showing is left running.
+    @discardableResult
+    func open(conversationID id: UUID) -> Bool {
+        if conversation?.uuid == id { return true }
+        guard let stored = try? context.fetch(FetchDescriptor<AgentConversation>(predicate: #Predicate { $0.uuid == id })).first else {
+            return false
+        }
+        scope = stored.hostID.map(Scope.host) ?? stored.groupID.map(Scope.group) ?? .all
+        open(stored)
+        return true
     }
 
     func newConversation() {
@@ -139,6 +155,7 @@ final class AgentPanelController {
         conversation = nil
         if let session {
             session.replace(messages: [])
+            session.toolRunner.conversationID = nil
         } else {
             session = makeSession(messages: [])
         }
