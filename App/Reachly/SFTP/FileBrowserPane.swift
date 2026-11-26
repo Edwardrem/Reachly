@@ -169,6 +169,17 @@ struct FileBrowserPane: View {
             }
         }
         .focused($focus, equals: .table)
+        // Copy, Cut and Paste from the Edit menu (and their shortcuts) while the table has focus. A text field
+        // with focus handles them itself, so the path field and the sheets keep their usual text editing.
+        .onCommand(#selector(NSText.copy(_:)), perform: pane.selection.isEmpty ? nil : {
+            model.copyToClipboard(pane.selectedItems, from: side)
+        })
+        .onCommand(#selector(NSText.cut(_:)), perform: pane.selection.isEmpty ? nil : {
+            model.cutToClipboard(pane.selectedItems, from: side)
+        })
+        .onCommand(#selector(NSText.paste(_:)), perform: model.canPaste ? {
+            Task { await model.paste(into: side) }
+        } : nil)
         .onChange(of: pane.selection) { old, new in
             // Only a selection that gains items: a refresh dropping vanished items is not the user moving here.
             if !new.isSubset(of: old) { focusPane() }
@@ -182,27 +193,45 @@ struct FileBrowserPane: View {
     @ViewBuilder
     private func contextMenu(for ids: Set<String>) -> some View {
         let items = pane.items.filter { ids.contains($0.path) }
+        let single = items.count == 1 ? items.first : nil
         if items.isEmpty {
             Button("New Folder…") { present(.newFolder(side)) }
+            Button("New File…") { present(.newFile(side)) }
+            Divider()
+            Button("Paste") { Task { await model.paste(into: side) } }
+                .disabled(!model.canPaste)
             Divider()
             Button("Reload") { Task { await pane.refresh() } }
         } else {
-            Button(otherPane.source.isRemote ? "Copy to \(otherPane.title)" : "Download to \(otherPane.title)") {
-                Task { await model.transfer(items, from: pane, to: otherPane) }
-            }
-            if items.count == 1, let item = items.first, !item.isDirectory {
-                if case .remote(let hostID) = pane.source {
+            if let item = single {
+                if item.isDirectory {
+                    Button("Open") { Task { await pane.open(item) } }
+                } else if case .remote(let hostID) = pane.source {
                     Button("Open") { Task { await model.openWith.open(hostID: hostID, remotePath: item.path, chooseApplication: false) } }
                     Button("Open With…") { Task { await model.openWith.open(hostID: hostID, remotePath: item.path, chooseApplication: true) } }
                 } else {
                     Button("Open") { NSWorkspace.shared.open(URL(fileURLWithPath: item.path)) }
+                }
+                if !pane.source.isRemote {
                     Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: item.path)]) }
                 }
+                Divider()
+            }
+            Button("Copy") { model.copyToClipboard(items, from: side) }
+            Button("Cut") { model.cutToClipboard(items, from: side) }
+            if let folder = single, folder.isDirectory {
+                Button("Paste into “\(folder.name)”") { Task { await model.paste(into: side, folder: folder.path) } }
+                    .disabled(!model.canPaste)
+            }
+            Button("Duplicate") { Task { await pane.duplicate(items) } }
+            Button(otherPane.source.isRemote ? "Copy to \(otherPane.title)" : "Download to \(otherPane.title)") {
+                Task { await model.transfer(items, from: pane, to: otherPane) }
             }
             Divider()
-            if items.count == 1, let item = items.first {
+            if let item = single {
                 Button("Rename…") { present(.rename(side, item)) }
             }
+            Button("Move to…") { present(.move(side, items)) }
             Button("Permissions…") { present(.permissions(side, items)) }
             Button("Copy Path") {
                 NSPasteboard.general.clearContents()

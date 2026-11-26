@@ -95,6 +95,13 @@ conversations. Your real hosts never leave your Mac.
   delete, new folder, show hidden files, and Open / Open With… for remote
   files, which are uploaded again whenever the editor saves them. Transfers
   pipeline 16 requests of 32 KiB and resume from where they stopped.
+
+  The panes also offer New File… (⌥⌘N), Duplicate (⌘D), Move to…, and Copy,
+  Cut and Paste (⌘C, ⌘X, ⌘V while a file list has focus) within a side or
+  between sides; Paste on a folder pastes into it. Nothing is overwritten: a
+  taken name gets a copy name or an error, and Cut to the other side removes
+  the originals only once everything has arrived. Every delete asks first.
+  Reload (⌘R, or the button in each path bar) reloads the pane you are in.
 - **Claude agent panel** (⌘⇧A): bring your own Anthropic or Caimex API key, kept
   apart in the Keychain, or point the panel at any OpenAI-compatible endpoint.
   Each provider keeps its own key: after upgrading from 0.3.8 an Anthropic key

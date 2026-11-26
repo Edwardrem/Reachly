@@ -46,20 +46,24 @@ struct SFTPWindowContent: View {
 
     enum PaneSheet: Identifiable {
         case newFolder(SFTPWindowModel.Side)
+        case newFile(SFTPWindowModel.Side)
         case rename(SFTPWindowModel.Side, FileItem)
+        case move(SFTPWindowModel.Side, [FileItem])
         case permissions(SFTPWindowModel.Side, [FileItem])
 
         var id: String {
             switch self {
             case .newFolder(let side): "newFolder-\(side)"
+            case .newFile(let side): "newFile-\(side)"
             case .rename(_, let item): "rename-\(item.path)"
+            case .move(let side, let items): "move-\(side)-\(items.count)"
             case .permissions(_, let items): "permissions-\(items.count)"
             }
         }
 
         var side: SFTPWindowModel.Side {
             switch self {
-            case .newFolder(let side), .rename(let side, _), .permissions(let side, _): side
+            case .newFolder(let side), .newFile(let side), .rename(let side, _), .move(let side, _), .permissions(let side, _): side
             }
         }
     }
@@ -90,6 +94,13 @@ struct SFTPWindowContent: View {
             TransferListView(queue: model.queue)
                 .frame(height: 170)
         }
+        .background {
+            // ⌘D has no button of its own in the window (Duplicate is in the item menu); this one carries the shortcut.
+            Button("Duplicate", action: duplicateSelection)
+                .keyboardShortcut("d", modifiers: .command)
+                .opacity(0)
+                .accessibilityHidden(true)
+        }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
@@ -104,6 +115,13 @@ struct SFTPWindowContent: View {
                 } label: {
                     Label("New Folder", systemImage: "folder.badge.plus")
                 }
+                Button {
+                    sheet = .newFile(model.focusedSide)
+                } label: {
+                    Label("New File", systemImage: "doc.badge.plus")
+                }
+                .keyboardShortcut("n", modifiers: [.command, .option])
+                .help("Create an empty file in the focused pane")
                 Button {
                     guard let item = model.focusedPane.selectedItems.first, model.focusedPane.selection.count == 1 else { return }
                     sheet = .rename(model.focusedSide, item)
@@ -141,12 +159,27 @@ struct SFTPWindowContent: View {
         .sheet(item: $sheet) { sheet in
             switch sheet {
             case .newFolder(let side):
-                NameSheet(title: "New Folder", prompt: "untitled folder", initial: "") { name in
-                    Task { await model.pane(side).makeDirectory(named: name) }
+                let pane = model.pane(side)
+                let names = names(in: pane)
+                NameSheet(title: "New Folder", prompt: "untitled folder", initial: FileNaming.uniqueName("untitled folder", existing: names), existing: names) { name in
+                    Task { await pane.makeDirectory(named: name) }
+                }
+            case .newFile(let side):
+                let pane = model.pane(side)
+                let names = names(in: pane)
+                NameSheet(title: "New File", prompt: "untitled.txt", initial: FileNaming.uniqueName("untitled.txt", existing: names), existing: names) { name in
+                    Task { await pane.createFile(named: name) }
                 }
             case .rename(let side, let item):
-                NameSheet(title: "Rename \(item.name)", prompt: item.name, initial: item.name) { name in
-                    Task { await model.pane(side).rename(item, to: name) }
+                let pane = model.pane(side)
+                NameSheet(title: "Rename \(item.name)", prompt: item.name, initial: item.name, existing: names(in: pane).subtracting([item.name])) { name in
+                    guard name != item.name else { return }
+                    Task { await pane.rename(item, to: name) }
+                }
+            case .move(let side, let items):
+                let pane = model.pane(side)
+                MoveSheet(items: items, folder: pane.path, canChoose: !pane.source.isRemote) { directory in
+                    Task { await pane.move(items, toDirectory: directory) }
                 }
             case .permissions(let side, let items):
                 PermissionsSheet(items: items) { mode in
@@ -197,6 +230,18 @@ struct SFTPWindowContent: View {
         let title = model.pane(side).title
         guard model.left.title == model.right.title else { return title }
         return "\(title) (\(side == .left ? "left" : "right"))"
+    }
+
+    /// Every name in the pane's folder, hidden ones too.
+    private func names(in pane: PaneModel) -> Set<String> {
+        Set(pane.items.map(\.name))
+    }
+
+    private func duplicateSelection() {
+        let pane = model.focusedPane
+        let items = pane.selectedItems
+        guard !items.isEmpty else { return }
+        Task { await pane.duplicate(items) }
     }
 
     private var isConfirmingDelete: Binding<Bool> {
@@ -344,27 +389,43 @@ private struct TransferRow: View {
     }
 }
 
-/// Asks for a name (new folder, rename).
+/// Asks for a name (new file, new folder, rename), checked as it is typed.
 struct NameSheet: View {
     let title: String
     let prompt: String
     let initial: String
+    /// Names already in the folder; one of them is refused here rather than failing later.
+    var existing: Set<String> = []
     let commit: (String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @FocusState private var focused: Bool
 
+    private var trimmed: String { name.trimmingCharacters(in: .whitespaces) }
+
+    /// Why the name can't be used, or nil when it can.
+    private var problem: String? {
+        if let error = FileNaming.validationError(for: trimmed) { return error }
+        if existing.contains(trimmed) { return "An item named “\(trimmed)” is already in this folder." }
+        return nil
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(title).font(.headline)
-            TextField("Name", text: $name, prompt: Text(prompt))
-                .textFieldStyle(.roundedBorder)
-                .focused($focused)
-                .onSubmit(submit)
+            VStack(alignment: .leading, spacing: 4) {
+                TextField("Name", text: $name, prompt: Text(prompt))
+                    .textFieldStyle(.roundedBorder)
+                    .focused($focused)
+                    .onSubmit(submit)
+                if let problem {
+                    Text(problem).font(.caption).foregroundStyle(.secondary)
+                }
+            }
             HStack {
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Spacer()
-                Button("OK", action: submit).keyboardShortcut(.defaultAction).disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || name.contains("/"))
+                Button("OK", action: submit).keyboardShortcut(.defaultAction).disabled(problem != nil)
             }
         }
         .padding(20)
@@ -376,10 +437,82 @@ struct NameSheet: View {
     }
 
     private func submit() {
-        let trimmed = name.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty, !trimmed.contains("/") else { return }
+        guard problem == nil else { return }
         commit(trimmed)
         dismiss()
+    }
+}
+
+/// Asks for the folder to move items into, on the same side.
+struct MoveSheet: View {
+    let items: [FileItem]
+    /// The folder the items are in now; the field starts there.
+    let folder: String
+    /// Panes on this Mac can pick the folder with an open panel.
+    let canChoose: Bool
+    let commit: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var path = ""
+    @FocusState private var focused: Bool
+
+    private var trimmed: String { path.trimmingCharacters(in: .whitespaces) }
+
+    /// Something other than the folder the items are already in.
+    private var canMove: Bool {
+        let target = Self.withoutTrailingSlash(trimmed)
+        return !target.isEmpty && target != "." && target != Self.withoutTrailingSlash(folder)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(items.count == 1 ? "Move “\(items[0].name)”" : "Move \(items.count) Items").font(.headline)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    TextField("Folder", text: $path, prompt: Text(folder))
+                        .textFieldStyle(.roundedBorder)
+                        .font(.callout.monospaced())
+                        .focused($focused)
+                        .onSubmit(submit)
+                    if canChoose {
+                        Button("Choose…", action: choose)
+                    }
+                }
+                Text("A full path, or one relative to the current folder.").font(.caption).foregroundStyle(.secondary)
+            }
+            HStack {
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Move", action: submit).keyboardShortcut(.defaultAction).disabled(!canMove)
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
+        .onAppear {
+            path = folder
+            focused = true
+        }
+    }
+
+    private func choose() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Choose"
+        panel.directoryURL = URL(fileURLWithPath: trimmed.hasPrefix("/") ? trimmed : folder)
+        if panel.runModal() == .OK, let url = panel.url { path = url.path }
+    }
+
+    private func submit() {
+        guard canMove else { return }
+        commit(trimmed)
+        dismiss()
+    }
+
+    private static func withoutTrailingSlash(_ path: String) -> String {
+        var path = path
+        while path.count > 1, path.hasSuffix("/") { path.removeLast() }
+        return path
     }
 }
 
