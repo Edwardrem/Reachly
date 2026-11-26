@@ -415,6 +415,28 @@ final class PaneModel: Identifiable {
         }
         await refresh()
     }
+
+    // CONTRACT (stream reachly-files-model implements these; stream reachly-files-ui calls them).
+
+    /// The last file operation's failure (create, rename, delete, move, duplicate, permissions, paste), shown under
+    /// the panes. Never cleared by a load or refresh; the next operation replaces it (nil when it succeeds).
+    /// `error` stays for listing failures only (the overlay with Try Again).
+    private(set) var operationMessage: String?
+
+    /// Creates an empty file called `name` in the current folder, then selects it.
+    func createFile(named name: String) async {
+        error = "New File is not available yet."
+    }
+
+    /// Copies each item next to itself, named with `FileNaming.copyName`.
+    func duplicate(_ items: [FileItem]) async {
+        error = "Duplicate is not available yet."
+    }
+
+    /// Moves the items into `directory` on the same side: an absolute path, or one relative to the current folder.
+    func move(_ items: [FileItem], toDirectory directory: String) async {
+        error = "Move is not available yet."
+    }
 }
 
 /// What a drag between panes carries: the source pane and the dragged paths.

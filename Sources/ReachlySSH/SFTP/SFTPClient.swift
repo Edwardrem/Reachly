@@ -251,6 +251,21 @@ public final class SFTPClient: @unchecked Sendable {
         try await removeDirectory(path)
     }
 
+    // CONTRACT (stream reachly-sftp-client implements these; the signatures are fixed).
+
+    /// Creates an empty file at `path`. Fails if anything already exists there: never truncates or replaces.
+    public func createFile(_ path: String, mode: UInt32? = nil) async throws {
+        throw SFTP.Error.protocolError("createFile is not implemented yet")
+    }
+
+    /// Copies a file, or a folder and everything in it, to `newPath` on the same server, streaming the bytes
+    /// through this client (SFTP v3 has no server-side copy). Never overwrites: fails before writing anything when
+    /// `newPath` exists. Symlinks are recreated as symlinks, not followed. Permissions are kept. Cancellable; on
+    /// failure or cancellation the partial copy is removed.
+    public func copyItem(_ path: String, to newPath: String, progress: Progress? = nil) async throws {
+        throw SFTP.Error.protocolError("copyItem is not implemented yet")
+    }
+
     // MARK: Files
 
     public func openFile(_ path: String, flags: SFTP.OpenFlags, mode: UInt32? = nil) async throws -> [UInt8] {
