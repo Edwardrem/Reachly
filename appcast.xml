@@ -6,6 +6,16 @@
     <description>Reachly releases</description>
     <language>en</language>
     <item>
+      <title>Reachly 1.1.2</title>
+      <link>https://github.com/Edwardrem/Reachly/releases/tag/v1.1.2</link>
+      <sparkle:version>5</sparkle:version>
+      <sparkle:shortVersionString>1.1.2</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+      <sparkle:releaseNotesLink>https://github.com/Edwardrem/Reachly/releases/tag/v1.1.2</sparkle:releaseNotesLink>
+      <pubDate>Thu, 26 Nov 2026 20:32:28 GMT</pubDate>
+      <enclosure url="https://github.com/Edwardrem/Reachly/releases/download/v1.1.2/Reachly-1.1.2.dmg" length="16984164" type="application/octet-stream" sparkle:version="5" sparkle:shortVersionString="1.1.2"/>
+    </item>
+    <item>
       <title>Reachly 1.1.1</title>
       <link>https://github.com/Edwardrem/Reachly/releases/tag/v1.1.1</link>
       <sparkle:version>4</sparkle:version>
