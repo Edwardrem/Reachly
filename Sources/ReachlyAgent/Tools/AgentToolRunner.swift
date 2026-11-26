@@ -297,7 +297,8 @@ public final class AgentToolRunner {
                     recordNotRun(tool: tool, on: target, command: command, reason: reason, decision: .denied, detail: "empty change request")
                     throw Failure.denied("Do not retry it unchanged; ask the user how to proceed if it is needed.")
                 }
-                let suggestion = AgentApprovalResponse.suggestion(edited, proposed: command)
+                // Only run_command's text is real input; the audit records what the model was told.
+                let suggestion = request.sendsEditWithComment ? AgentApprovalResponse.suggestion(edited, proposed: command) : nil
                 let detail = AgentAuditDecision.changesRequestedDetail(guardrail: why, comment: comment, suggestion: suggestion)
                 recordNotRun(tool: tool, on: target, command: command, reason: reason, decision: .changesRequested, detail: detail)
                 throw ChangesRequested(feedback: Self.changesRequestedText(tool: tool, host: target, comment: comment, suggestion: suggestion))
@@ -308,15 +309,21 @@ public final class AgentToolRunner {
         }
     }
 
+    /// How every changes-requested tool result begins.
+    public static let changesRequestedPrefix = "The user did not run this command and wants changes"
+
     /// What the model reads when the user asks for changes: nothing ran, their
-    /// comment as typed, their edited command when there is one, and what to do next.
+    /// comment as typed, their edited command when there is one (run_command
+    /// only), and what to do next.
     static func changesRequestedText(tool: AgentToolName, host target: AgentHostInfo, comment: String, suggestion: String?) -> String {
-        let noun = tool == .runCommand ? "command" : "arguments"
-        var text = "The user did not run this command and wants changes before anything runs on \(target.name). Their comment:\n<user_comment>\n\(comment)\n</user_comment>\n"
-        if let suggestion {
+        var text = changesRequestedPrefix + " before anything runs on \(target.name). Their comment:\n<user_comment>\n\(comment)\n</user_comment>\n"
+        if tool == .runCommand, let suggestion {
             text += "They also edited the command in the approval sheet. Their suggested version:\n<suggested_command>\n\(suggestion)\n</suggested_command>\n"
         }
-        text += "Nothing ran. Change the \(noun) to follow their comment and call \(tool.rawValue) again; the user reviews the new version before it runs. If the comment asks a question or is unclear, reply to the user instead of calling the tool."
+        text += tool == .runCommand
+            ? "Nothing ran. Change the command to follow their comment and call run_command again"
+            : "Nothing ran. Adjust the \(tool.rawValue) arguments to follow their comment and call \(tool.rawValue) again"
+        text += "; the user reviews the new version before it runs. If the comment asks a question or is unclear, reply to the user instead of calling the tool."
         return text
     }
 

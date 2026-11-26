@@ -61,6 +61,12 @@ public struct AgentApprovalRequest: Sendable, Identifiable {
         self.detail = detail
         self.isDestructive = isDestructive
     }
+
+    /// Whether an edit goes back to the model with a comment. Only run_command's
+    /// text is the tool's real input; the other tools show a stand-in line
+    /// (`cat > path  # upload 12 bytes from …`), and passing that back could
+    /// lead the model to run it as a command, so only the comment is sent.
+    public var sendsEditWithComment: Bool { tool == AgentToolName.runCommand.rawValue }
 }
 
 public enum AgentApprovalResponse: Sendable, Equatable {
@@ -85,11 +91,18 @@ public enum AgentApprovalResponse: Sendable, Equatable {
     }
 
     /// The sheet's Send answer for a comment and the command as it stands in
-    /// the editor. The edit is kept only when it differs from the proposal and
-    /// is not empty. Nil when the comment is empty.
-    public static func changeRequest(comment: String, command: String, proposed: String) -> AgentApprovalResponse? {
+    /// the editor. The edit is kept only when `includingEdit` (see
+    /// `AgentApprovalRequest.sendsEditWithComment`) and it differs from the
+    /// proposal by more than surrounding whitespace. Nil when the comment is empty.
+    public static func changeRequest(comment: String, command: String, proposed: String, includingEdit: Bool = true) -> AgentApprovalResponse? {
         guard let comment = normalizedComment(comment) else { return nil }
-        return .requestChanges(comment: comment, editedCommand: suggestion(command, proposed: proposed))
+        return .requestChanges(comment: comment, editedCommand: includingEdit ? suggestion(command, proposed: proposed) : nil)
+    }
+
+    /// The edited command this answer passes back to the model, if any.
+    public var suggestedCommand: String? {
+        if case .requestChanges(_, let edited) = self { return edited }
+        return nil
     }
 
     /// The edited command worth passing back, or nil when it is empty or unchanged.

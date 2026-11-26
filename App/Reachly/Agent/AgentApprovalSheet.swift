@@ -26,7 +26,18 @@ struct AgentApprovalSheet: View {
     private var isEmpty: Bool { command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     /// What Send answers; nil while the comment is empty or only whitespace.
     private var changeRequest: AgentApprovalResponse? {
-        AgentApprovalResponse.changeRequest(comment: comment, command: command, proposed: request.command)
+        AgentApprovalResponse.changeRequest(comment: comment, command: command, proposed: request.command, includingEdit: request.sendsEditWithComment)
+    }
+    /// Send passes the edited command back too (run_command only, and only a real change).
+    private var sendsEdit: Bool { changeRequest?.suggestedCommand != nil }
+    /// The hint under the comment: what Send does, and how to run the command instead.
+    private var commentHint: String {
+        var hint = "Nothing runs. \(requesterName) gets your comment\(sendsEdit ? " and your edit" : "") and can propose a revised command."
+        if isEdited && !request.sendsEditWithComment {
+            hint += " Edits to this line are not sent for \(request.tool); describe the change in the comment."
+        }
+        hint += " Clear the comment to \(sendsEdit ? "run your edit" : "run the command") instead."
+        return hint
     }
     /// A comment is waiting to be sent, so Approve and Run Edited Command stay off:
     /// running the command would drop it.
@@ -88,7 +99,7 @@ struct AgentApprovalSheet: View {
                 if hasComment || comment.count > commentLimit - 200 {
                     HStack(alignment: .firstTextBaseline) {
                         if hasComment {
-                            Text("Nothing runs. \(requesterName) gets your comment\(isEdited ? " and your edit" : "") and can propose a revised command. Clear the comment to \(isEdited ? "run your edit" : "approve") instead.")
+                            Text(commentHint)
                         }
                         Spacer(minLength: 8)
                         if comment.count > commentLimit - 200 {
