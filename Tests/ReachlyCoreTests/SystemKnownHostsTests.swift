@@ -52,6 +52,20 @@ import Testing
         #expect(scan.hashedEntryCount == 0)
     }
 
+    @Test func linesBreakOnlyAtLineFeedsAsInSSH() {
+        // Each of these would start a host line if it ended a line; ssh reads one comment.
+        for separator in ["\r", "\u{0B}", "\u{0C}", "\u{85}", "\u{2028}", "\u{2029}"] {
+            let scan = SystemKnownHosts.parse(["# note\(separator)evil.example.com \(Self.ed1)\n"])
+            #expect(scan.servers.isEmpty, "split at U+\(String(separator.unicodeScalars.first!.value, radix: 16))")
+        }
+        // A separator inside a host line spoils that line rather than splitting it.
+        #expect(SystemKnownHosts.parse(["web.example.com\u{2028}other.example.com \(Self.ed1)"]).servers.isEmpty)
+        // CRLF endings lose exactly one CR, including on a last line without a newline.
+        let scan = SystemKnownHosts.parse(["one.example.com \(Self.ed1)\r\ntwo.example.com \(Self.ed1)\r"])
+        #expect(scan.servers.map(\.id) == ["one.example.com", "two.example.com"])
+        #expect(SystemKnownHosts.lines("a\r\r\nb\n\nc").map(String.init) == ["a\r", "b", "c"])
+    }
+
     @Test func fingerprintsMatchSSHKeygen() throws {
         let scan = SystemKnownHosts.parse(["a.example.com \(Self.ed1)\na.example.com \(Self.ec1)"])
         let keys = try #require(scan.servers.first?.keys)
@@ -284,6 +298,43 @@ import Testing
     }
 
     @MainActor
+    @Test func addTrustsTheKeysBeforeTheHostIsSaved() async throws {
+        let container = try ModelContainer(for: Schema(ReachlySchema.models), configurations: [ModelConfiguration(isStoredInMemoryOnly: true)])
+        let context = container.mainContext
+        context.insert(SSHHost(name: "old", hostname: "old.example.com", username: "me", sortOrder: 5))
+        try context.save()
+        let server = try #require(SystemKnownHosts.parse(["[new.example.com]:2200 \(Self.ed1)"]).servers.first)
+        let store = KnownHostsStore(url: temporaryDirectory().appending(path: "known_hosts.json"))
+
+        let result = await SystemKnownHosts.add(server, to: context, store: store, localUsername: "me")
+        let host = try #require(result.host)
+        #expect(result.trustError == nil)
+        #expect(result.saveError == nil)
+        #expect(host.sortOrder == 6)
+        #expect(try context.fetchCount(FetchDescriptor<SSHHost>()) == 2)
+        #expect(await store.verdict(host: host.hostname, port: host.port, keyType: "ssh-ed25519", publicKey: Self.ed1) == .known)
+    }
+
+    @MainActor
+    @Test func addKeepsTheHostWhenItsKeysCannotBeSaved() async throws {
+        let container = try ModelContainer(for: Schema(ReachlySchema.models), configurations: [ModelConfiguration(isStoredInMemoryOnly: true)])
+        let directory = temporaryDirectory()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // The store's folder would have to be created where a file already is.
+        let blocker = directory.appending(path: "blocker")
+        try "".write(to: blocker, atomically: true, encoding: .utf8)
+        let store = KnownHostsStore(url: blocker.appending(path: "known_hosts.json"))
+        let server = try #require(SystemKnownHosts.parse(["box.example.com \(Self.ed1)"]).servers.first)
+
+        let result = await SystemKnownHosts.add(server, to: container.mainContext, store: store, localUsername: "me")
+        #expect(result.trustError != nil)
+        #expect(result.saveError == nil)
+        #expect(result.host?.hostname == "box.example.com")
+        #expect(try container.mainContext.fetchCount(FetchDescriptor<SSHHost>()) == 1)
+    }
+
+    @MainActor
     @Test func newHostsUseTheImportDefaults() throws {
         let container = try ModelContainer(for: Schema(ReachlySchema.models), configurations: [ModelConfiguration(isStoredInMemoryOnly: true)])
         let plain = SystemKnownHosts.Server(endpoint: .init(host: "box.example.com"), keys: [])
@@ -312,22 +363,70 @@ import Testing
         try "two.example.com \(Self.ed1)\n@revoked * \(Self.ed1)\nthree.example.com \(Self.ec1)\n".write(to: directory.appending(path: "known_hosts2"), atomically: true, encoding: .utf8)
         try "Host three\n  HostName three.example.com\n  User ops\n".write(to: directory.appending(path: "config"), atomically: true, encoding: .utf8)
 
-        let scan = SystemKnownHosts.load(sshDirectory: directory)
-        #expect(scan.servers.map(\.id) == ["three.example.com"])
-        #expect(scan.servers.first?.configUser == "ops")
+        let loaded = SystemKnownHosts.load(sshDirectory: directory, globalKnownHostsURLs: [])
+        #expect(loaded.scan.servers.map(\.id) == ["three.example.com"])
+        #expect(loaded.scan.servers.first?.configUser == "ops")
+        #expect(loaded.sources.entries.map(\.url.lastPathComponent) == ["known_hosts", "known_hosts2", "config"])
+        #expect(loaded.sources.entries.allSatisfy { $0.stamp != nil })
+        #expect(!loaded.sources.haveChanged())
+    }
 
-        let stamps = SystemKnownHosts.stamps(sshDirectory: directory)
-        #expect(stamps.count == 3)
-        #expect(stamps.allSatisfy { $0 != nil })
-        #expect(SystemKnownHosts.stamps(sshDirectory: directory) == stamps)
+    @Test func editingAnIncludedConfigFileIsNoticed() throws {
+        let directory = temporaryDirectory()
+        let manager = FileManager.default
+        try manager.createDirectory(at: directory.appending(path: "config.d"), withIntermediateDirectories: true)
+        defer { try? manager.removeItem(at: directory) }
+        try "web.example.com \(Self.ed1)\n".write(to: directory.appending(path: "known_hosts"), atomically: true, encoding: .utf8)
+        try "Include config.d/*\nInclude extra.conf\n".write(to: directory.appending(path: "config"), atomically: true, encoding: .utf8)
+        let included = directory.appending(path: "config.d/web")
+        try "Host web\n  HostName web.example.com\n  User deploy\n".write(to: included, atomically: true, encoding: .utf8)
+
+        var loaded = SystemKnownHosts.load(sshDirectory: directory, globalKnownHostsURLs: [])
+        #expect(loaded.scan.servers.first?.configUser == "deploy")
+        // The included file, the globbed directory and the missing extra.conf are all stamped.
+        #expect(loaded.sources.entries.map(\.url.lastPathComponent) == ["known_hosts", "known_hosts2", "config", "config.d", "web", "extra.conf"])
+        #expect(!loaded.sources.haveChanged())
+
+        try "Host web\n  HostName web.example.com\n  User ops\n".write(to: included, atomically: true, encoding: .utf8)
+        #expect(loaded.sources.haveChanged())
+        loaded = SystemKnownHosts.load(sshDirectory: directory, globalKnownHostsURLs: [])
+        #expect(loaded.scan.servers.first?.configUser == "ops")
+        #expect(!loaded.sources.haveChanged())
+
+        // An include that was missing appearing counts as a change too.
+        try "Host x\n".write(to: directory.appending(path: "extra.conf"), atomically: true, encoding: .utf8)
+        #expect(loaded.sources.haveChanged())
+    }
+
+    @Test func systemWideFilesOnlyRevoke() throws {
+        let directory = temporaryDirectory()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try "web.example.com \(Self.ed1)\nweb.example.com \(Self.ec1)\n".write(to: directory.appending(path: "known_hosts"), atomically: true, encoding: .utf8)
+        let global = directory.appending(path: "ssh_known_hosts")
+        try "@revoked * \(Self.ed1)\nfleet.example.com \(Self.ed2)\n".write(to: global, atomically: true, encoding: .utf8)
+        let missing = directory.appending(path: "ssh_known_hosts2")
+
+        let loaded = SystemKnownHosts.load(sshDirectory: directory, globalKnownHostsURLs: [global, missing])
+        // The revocation applies; the system file's own server is not offered.
+        #expect(loaded.scan.servers.map(\.id) == ["web.example.com"])
+        #expect(loaded.scan.servers.first?.keys.map(\.publicKey) == [Self.ec1])
+        #expect(loaded.sources.entries.map(\.url.lastPathComponent).contains("ssh_known_hosts"))
+
+        let parsed = SystemKnownHosts.parse(["web.example.com \(Self.ed1)"], revocationsFrom: ["# nothing revoked\nfleet.example.com \(Self.ed2)"])
+        #expect(parsed.servers.map(\.id) == ["web.example.com"])
+        #expect(parsed.servers.first?.keys.map(\.publicKey) == [Self.ed1])
+        #expect(SystemKnownHosts.defaultGlobalKnownHostsURLs.map(\.path) == ["/etc/ssh/ssh_known_hosts", "/etc/ssh/ssh_known_hosts2"])
     }
 
     @Test func missingAndOversizedFilesAreIgnored() throws {
         let directory = temporaryDirectory()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        #expect(SystemKnownHosts.load(sshDirectory: directory) == .empty)
-        #expect(SystemKnownHosts.stamps(sshDirectory: directory) == [nil, nil, nil])
+        let loaded = SystemKnownHosts.load(sshDirectory: directory, globalKnownHostsURLs: [])
+        #expect(loaded.scan == .empty)
+        #expect(loaded.sources.entries.map(\.stamp) == [nil, nil, nil])
+        #expect(!loaded.sources.haveChanged())
 
         let file = directory.appending(path: "known_hosts")
         try "big.example.com \(Self.ed1)\n".write(to: file, atomically: true, encoding: .utf8)

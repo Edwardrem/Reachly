@@ -21,12 +21,10 @@ struct HostListView: View {
     @State private var groupToDelete: HostGroup?
     /// Servers in ~/.ssh/known_hosts, for the "Detected on this Mac" section.
     @State private var detected = DetectedHostsModel()
-    /// Detected servers the user hid (`SystemKnownHosts.Server.id`), remembered between launches.
-    @AppStorage("sidebar.hiddenDetectedHosts") private var hiddenDetectedRaw = ""
     @AppStorage("sidebar.detectedExpanded") private var detectedExpanded = true
 
     var body: some View {
-        let suggestions = detectedSuggestions
+        let suggestions = detected.suggestions
         List(selection: $selection) {
             let ungrouped = HostGrouping.members(of: nil, in: hosts)
             if !ungrouped.isEmpty {
@@ -89,6 +87,7 @@ struct HostListView: View {
                 DetectedHostsSection(
                     suggestions: suggestions,
                     scan: detected.scan,
+                    adding: detected.adding,
                     isExpanded: $detectedExpanded,
                     add: addDetected,
                     hide: hideDetected,
@@ -109,6 +108,11 @@ struct HostListView: View {
                         Button(showHiddenDetectedTitle(suggestions.hiddenCount), action: showHiddenDetected)
                     }
                 }
+            }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if let notice = detected.notice {
+                DetectedHostsNoticeView(notice: notice) { detected.notice = nil }
             }
         }
         .detectsKnownHosts(detected)
@@ -303,37 +307,24 @@ struct HostListView: View {
 
     // MARK: - Detected on this Mac
 
-    private var hiddenDetected: Set<String> {
-        Set(hiddenDetectedRaw.split(separator: ",").map(String.init))
-    }
-
-    /// Detected servers not yet in Reachly, filtered against the live hosts.
-    private var detectedSuggestions: SystemKnownHosts.Suggestions {
-        SystemKnownHosts.suggestions(
-            from: detected.scan,
-            existing: hosts.map { SystemKnownHosts.Endpoint(host: $0.hostname, port: $0.port) },
-            hidden: hiddenDetected)
-    }
-
-    /// Saves the server as a host, then trusts its known keys under the saved
-    /// hostname and port: exactly what a session asks the store about.
+    /// Trusts the server's known keys under the new host's hostname and port
+    /// (what a session asks the store about), then saves the host, and only
+    /// then selects it, so ⌘↩ or a double-click can't connect before the keys
+    /// are stored.
     private func addDetected(_ server: SystemKnownHosts.Server) {
-        let host = SystemKnownHosts.makeHost(for: server, sortOrder: HostGrouping.nextSortOrder(after: HostGrouping.members(of: nil, in: hosts)))
-        modelContext.insert(host)
-        try? modelContext.save()
-        selection = host.uuid
-        let keys = server.keys, hostname = host.hostname, port = host.port
         Task {
-            _ = try? await SystemKnownHosts.trust(keys, hostname: hostname, port: port, in: .shared)
+            if let id = await detected.add(server, in: modelContext) {
+                selection = id
+            }
         }
     }
 
     private func hideDetected(_ servers: [SystemKnownHosts.Server]) {
-        hiddenDetectedRaw = hiddenDetected.union(servers.map(\.id)).sorted().joined(separator: ",")
+        detected.hide(servers)
     }
 
     private func showHiddenDetected() {
-        hiddenDetectedRaw = ""
+        detected.showHidden()
     }
 
     private func showHiddenDetectedTitle(_ count: Int) -> String {

@@ -1,4 +1,5 @@
 import Foundation
+import SwiftData
 
 /// Servers this Mac already trusts in `~/.ssh/known_hosts`, offered in the
 /// sidebar so they can be added to Reachly with their keys.
@@ -117,14 +118,21 @@ public enum SystemKnownHosts {
     // MARK: - Parsing
 
     /// Parses the text of known_hosts files, in the order ssh reads them (a
-    /// `@revoked` line in any file applies to all). `config` supplies `User`
-    /// for servers a `~/.ssh/config` Host block names.
-    public static func parse(_ texts: [String], config: [SSHConfigHost] = [], maximumServers: Int = maximumServers) -> Scan {
+    /// `@revoked` line in any file applies to all). `revocationsFrom` are the
+    /// system-wide files: only their `@revoked` lines are used, never their
+    /// servers. `config` supplies `User` for servers a `~/.ssh/config` Host
+    /// block names.
+    public static func parse(_ texts: [String], revocationsFrom systemTexts: [String] = [], config: [SSHConfigHost] = [], maximumServers: Int = maximumServers) -> Scan {
         var entries: [Entry] = []
         var revoked: Set<String> = []
         var hashed = 0
+        for text in systemTexts {
+            for rawLine in lines(text) {
+                if case .revoked(let fingerprint) = parseLine(rawLine) { revoked.insert(fingerprint) }
+            }
+        }
         for text in texts {
-            for rawLine in text.split(whereSeparator: \.isNewline) {
+            for rawLine in lines(text) {
                 switch parseLine(rawLine) {
                 case .entry(let endpoints, let key): entries.append(Entry(endpoints: endpoints, key: key))
                 case .hashed: hashed += 1
@@ -163,11 +171,24 @@ public enum SystemKnownHosts {
         }
     }
 
-    /// `[@marker] patterns keytype base64 [comment]`
+    /// Lines as ssh reads them: split on "\n" only (not on a lone CR, VT, FF,
+    /// NEL or the Unicode separators, so a comment can't become a host line),
+    /// with one trailing "\r" dropped.
+    static func lines(_ text: String) -> [Substring] {
+        text.unicodeScalars.split(separator: "\n").map { scalars in
+            scalars.last == "\r" ? Substring(scalars.dropLast()) : Substring(scalars)
+        }
+    }
+
+    private static func isFieldSeparator(_ character: Character) -> Bool {
+        character == " " || character == "\t"
+    }
+
+    /// `[@marker] patterns keytype base64 [comment]`, fields separated by spaces or tabs.
     private static func parseLine(_ raw: Substring) -> Line? {
-        let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let line = raw.drop(while: isFieldSeparator)
         guard !line.isEmpty, !line.hasPrefix("#") else { return nil }
-        var fields = line.split(whereSeparator: { $0 == " " || $0 == "\t" })[...]
+        var fields = line.split(whereSeparator: isFieldSeparator)[...]
         var marker: Substring?
         if let first = fields.first, first.hasPrefix("@") {
             marker = first
@@ -335,7 +356,7 @@ public enum SystemKnownHosts {
     /// and not hidden by the user. `hidden` holds `Server.id`s.
     public static func suggestions(
         from scan: Scan,
-        existing: [Endpoint],
+        existing: some Sequence<Endpoint>,
         hidden: Set<String>,
         excluding excludedHosts: Set<String> = codeHostingHosts
     ) -> Suggestions {
@@ -405,42 +426,143 @@ public enum SystemKnownHosts {
         return outcome
     }
 
+    /// What Add did. `host` is nil when saving failed (the host was not kept).
+    public struct AddResult {
+        public let host: SSHHost?
+        /// Set when the keys could not be saved in Reachly's store; the host is still added.
+        public let trustError: (any Error)?
+        public let saveError: (any Error)?
+    }
+
+    /// Adds the server as a host. Its keys are trusted first, under the new
+    /// host's own hostname and port, and only then is the host inserted and
+    /// saved, so a connection started from the new host can't race the keys.
+    /// A failed trust still adds the host (the first connection then asks); a
+    /// failed save removes it again.
+    @MainActor
+    public static func add(_ server: Server, to context: ModelContext, store: KnownHostsStore, localUsername: String = NSUserName()) async -> AddResult {
+        let host = makeHost(for: server, localUsername: localUsername)
+        var trustError: (any Error)?
+        do {
+            try await trust(server.keys, hostname: host.hostname, port: host.port, in: store)
+        } catch {
+            trustError = error
+        }
+        let ungrouped = ((try? context.fetch(FetchDescriptor<SSHHost>())) ?? []).filter { $0.group == nil }
+        host.sortOrder = HostGrouping.nextSortOrder(after: ungrouped)
+        context.insert(host)
+        do {
+            try context.save()
+        } catch {
+            context.delete(host)
+            return AddResult(host: nil, trustError: trustError, saveError: error)
+        }
+        return AddResult(host: host, trustError: trustError, saveError: nil)
+    }
+
     // MARK: - Files
 
     public static var defaultSSHDirectory: URL {
         FileManager.default.homeDirectoryForCurrentUser.appending(path: ".ssh", directoryHint: .isDirectory)
     }
 
+    /// The system-wide files ssh also reads (`GlobalKnownHostsFile`). Only
+    /// their `@revoked` lines are used, never their servers.
+    public static let defaultGlobalKnownHostsURLs = [
+        URL(fileURLWithPath: "/etc/ssh/ssh_known_hosts"),
+        URL(fileURLWithPath: "/etc/ssh/ssh_known_hosts2"),
+    ]
+
     /// `known_hosts` and `known_hosts2`, in the order ssh reads them.
     public static func knownHostsURLs(in sshDirectory: URL = defaultSSHDirectory) -> [URL] {
         [sshDirectory.appending(path: "known_hosts"), sshDirectory.appending(path: "known_hosts2")]
     }
 
-    /// Size and modification date of a file a scan reads, so an unchanged set of
-    /// files is not parsed again. Nil when the file is missing.
+    /// Size and modification date of a file or directory.
     public struct FileStamp: Hashable, Sendable {
         public let size: Int
         public let modified: Date
     }
 
-    /// Stamps for the files `load` reads.
-    public static func stamps(sshDirectory: URL = defaultSSHDirectory) -> [FileStamp?] {
-        (knownHostsURLs(in: sshDirectory) + [sshDirectory.appending(path: "config")]).map { url in
-            guard let values = try? url.resolvingSymlinksInPath().resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
-                  let size = values.fileSize, let modified = values.contentModificationDate else { return nil }
-            return FileStamp(size: size, modified: modified)
+    /// Nil when the file is missing.
+    static func stamp(of url: URL) -> FileStamp? {
+        guard let values = try? url.resolvingSymlinksInPath().resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
+              let modified = values.contentModificationDate else { return nil }
+        return FileStamp(size: values.fileSize ?? 0, modified: modified)
+    }
+
+    /// Everything a scan read: each file, every file an `Include` pulled in and
+    /// each directory an `Include` glob listed, with its stamp taken just before
+    /// it was read. Missing files are listed too, so their appearing counts.
+    public struct Sources: Hashable, Sendable {
+        public struct Entry: Hashable, Sendable {
+            public let url: URL
+            public let stamp: FileStamp?
+        }
+
+        public private(set) var entries: [Entry] = []
+
+        mutating func record(_ url: URL) {
+            guard !entries.contains(where: { $0.url == url }) else { return }
+            entries.append(Entry(url: url, stamp: SystemKnownHosts.stamp(of: url)))
+        }
+
+        /// True when any of them was created, removed or modified since the scan.
+        public func haveChanged() -> Bool {
+            entries.contains { SystemKnownHosts.stamp(of: $0.url) != $0.stamp }
         }
     }
 
-    /// Reads the known_hosts files and `~/.ssh/config` (for `User`) and parses
-    /// them. Read only; missing, unreadable or oversized files are skipped.
-    public static func load(sshDirectory: URL = defaultSSHDirectory) -> Scan {
-        let texts = knownHostsURLs(in: sshDirectory).compactMap { readText(at: $0) }
-        var config: [SSHConfigHost] = []
-        if let text = readText(at: sshDirectory.appending(path: "config")) {
-            config = SSHConfigFile.parse(text, include: SSHConfigFile.defaultIncludeResolver(sshDirectory: sshDirectory))
+    /// Reads files for `load`, stamping each one just before reading it.
+    private final class SourceReader {
+        private(set) var sources = Sources()
+
+        func read(_ url: URL) -> String? {
+            sources.record(url)
+            return readText(at: url)
         }
-        return parse(texts, config: config)
+
+        func note(_ url: URL) {
+            sources.record(url)
+        }
+    }
+
+    /// Reads the known_hosts files, the `@revoked` lines of the system-wide
+    /// files, and `~/.ssh/config` with its `Include`s (for `User`), and parses
+    /// them. Read only; missing, unreadable or oversized files are skipped.
+    public static func load(sshDirectory: URL = defaultSSHDirectory, globalKnownHostsURLs: [URL] = defaultGlobalKnownHostsURLs) -> (scan: Scan, sources: Sources) {
+        let reader = SourceReader()
+        let texts = knownHostsURLs(in: sshDirectory).compactMap(reader.read)
+        let systemTexts = globalKnownHostsURLs.compactMap(reader.read)
+        var config: [SSHConfigHost] = []
+        if let text = reader.read(sshDirectory.appending(path: "config")) {
+            config = SSHConfigFile.parse(text, include: includeResolver(sshDirectory: sshDirectory, reader: reader))
+        }
+        return (parse(texts, revocationsFrom: systemTexts, config: config), reader.sources)
+    }
+
+    /// Resolves `Include` the way `SSHConfigFile.defaultIncludeResolver` does
+    /// (`~`, relative to ~/.ssh, a `*` glob in the last component), reading
+    /// through `reader` so every included file, and each globbed directory, is
+    /// stamped.
+    private static func includeResolver(sshDirectory: URL, reader: SourceReader) -> (String) -> String? {
+        { path in
+            var expanded = (path as NSString).expandingTildeInPath
+            if !expanded.hasPrefix("/") { expanded = sshDirectory.appending(path: expanded).path }
+            var files: [URL] = []
+            if expanded.contains("*") {
+                let directory = URL(fileURLWithPath: (expanded as NSString).deletingLastPathComponent, isDirectory: true)
+                let pattern = (expanded as NSString).lastPathComponent
+                // A file added to or removed from the directory changes its date.
+                reader.note(directory)
+                let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+                files = names.sorted().filter { SSHConfigFile.globMatches(pattern, $0) }.map { directory.appending(path: $0) }
+            } else {
+                files = [URL(fileURLWithPath: expanded)]
+            }
+            let texts = files.compactMap(reader.read)
+            return texts.isEmpty ? nil : texts.joined(separator: "\n")
+        }
     }
 
     /// The text of a regular file of at most `limit` bytes, else nil. Never reads past the limit.
