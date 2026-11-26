@@ -1271,6 +1271,8 @@ private struct ToolCallView: View {
     private var statusColor: Color {
         guard let result else { return .orange }
         if result.isError { return .red }
+        // Nothing ran: the user sent a comment back from the approval sheet.
+        if result.content.hasPrefix(AgentToolRunner.changesRequestedPrefix) { return .blue }
         if let status = exitStatus, status != 0 { return .yellow }
         return .green
     }

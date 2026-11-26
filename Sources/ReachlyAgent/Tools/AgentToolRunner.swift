@@ -310,9 +310,13 @@ public final class AgentToolRunner {
 
     /// What the model reads when the user asks for changes: nothing ran, their
     /// comment as typed, their edited command when there is one, and what to do next.
+    /// How every "changes requested" result starts, so the panel can tell it
+    /// apart from a call that ran.
+    public static let changesRequestedPrefix = "The user did not run this command and wants changes"
+
     static func changesRequestedText(tool: AgentToolName, host target: AgentHostInfo, comment: String, suggestion: String?) -> String {
         let noun = tool == .runCommand ? "command" : "arguments"
-        var text = "The user did not run this command and wants changes before anything runs on \(target.name). Their comment:\n<user_comment>\n\(comment)\n</user_comment>\n"
+        var text = "\(changesRequestedPrefix) before anything runs on \(target.name). Their comment:\n<user_comment>\n\(comment)\n</user_comment>\n"
         if let suggestion {
             text += "They also edited the command in the approval sheet. Their suggested version:\n<suggested_command>\n\(suggestion)\n</suggested_command>\n"
         }

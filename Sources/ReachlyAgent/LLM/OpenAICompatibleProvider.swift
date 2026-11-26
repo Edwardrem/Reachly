@@ -80,7 +80,39 @@ public struct OpenAICompatibleProvider: LLMProvider {
                 out.append(.object(entry))
             }
         }
+        return mergingConsecutiveUserTurns(out)
+    }
+
+    /// Joins user messages that follow each other into one. A send that failed
+    /// before any reply leaves two user turns in a row (the failure row is not
+    /// sent), and some endpoints, DeepSeek's reasoner among them, reject that.
+    static func mergingConsecutiveUserTurns(_ messages: [JSONValue]) -> [JSONValue] {
+        var out: [JSONValue] = []
+        for message in messages {
+            guard message["role"]?.stringValue == "user", let previous = out.last,
+                  previous["role"]?.stringValue == "user",
+                  let joined = joinedUserContent(previous["content"], message["content"]) else {
+                out.append(message)
+                continue
+            }
+            out[out.count - 1] = ["role": "user", "content": joined]
+        }
         return out
+    }
+
+    private static func joinedUserContent(_ first: JSONValue?, _ second: JSONValue?) -> JSONValue? {
+        if let a = first?.stringValue, let b = second?.stringValue {
+            return .string(a + "\n\n" + b)
+        }
+        guard let a = contentParts(first), let b = contentParts(second) else { return nil }
+        return .array(a + b)
+    }
+
+    /// A user message's content as parts: a string becomes one text part.
+    private static func contentParts(_ content: JSONValue?) -> [JSONValue]? {
+        if let text = content?.stringValue { return [["type": "text", "text": .string(text)]] }
+        if case .array(let parts)? = content { return parts }
+        return nil
     }
 
     /// Images go as data-URI `image_url` parts; PDFs are sent as their text, since
